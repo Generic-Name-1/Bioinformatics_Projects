@@ -1,0 +1,166 @@
+---
+title: "Kim_2014"
+output: html_document
+---
+
+
+Paper in question: https://pmc.ncbi.nlm.nih.gov/articles/PMC5528589/
+
+#Paper that discusses RNA-SEQ practices for begginers
+https://pmc.ncbi.nlm.nih.gov/articles/PMC12599993/
+
+1) Import Data
+2) Format the Meta Data
+3) Format the Raw Count Data and look for potential duplicates to account for 
+4) For the DeSEQ2 function, make sure the meta_data rownames are equal to the sample IDs which should be *identical* to the column names of the raw counts
+5) Run the DeSEQ2 Analysis (it needs raw counts not normalized counts because it automatically normalizes the counts for us)
+6) Optional? --> Remove any GeneIDs where the rowSums of the raw counts is very small to speed up the analysis. If the raw counts # is very low, its unlikely to have any major effect on the differential expression analysis
+7) Convert the DeSEQ2 analysis into a results object 
+8) Convert the results object into a dataframe
+9) Make graphs as wanted/needed
+
+
+Unfortunately, there aren't any examples in this specific chart that I will be able to duplicate/replicate because the word document uses a different dataset for some reason that I can't access, and the paper doesn't seem to make any figures using this data. Or at least ones that I can easily replicate.
+
+### Step 1
+
+
+```{r}
+library(tidyverse)
+library(MASS)
+library(DESeq2)
+library(GEOquery)
+library(here)
+
+#Downloaded on May 4th 2026
+raw_counts <- read_tsv(gzcon(url("https://www.ncbi.nlm.nih.gov/geo/download/?type=rnaseq_counts&acc=GSE50760&format=file&file=GSE50760_raw_counts_GRCh38.p13_NCBI.tsv.gz")))
+
+meta_data <- getGEO(
+  GEO = "GSE50760",
+  GSEMatrix = TRUE
+)
+
+#Extract Metadata
+meta_data <- pData(phenoData(meta_data[[1]]))
+
+Gene_Names <- read_tsv(gzcon(url("https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts&file=Human.GRCh38.p13.annot.tsv.gz")))
+
+Gene_Names <- Gene_Names %>% dplyr:: select(GeneID, Symbol)
+```
+
+##Step 2
+
+```{r}
+meta_data <- meta_data %>%
+  dplyr::select(title, Source = source_name_ch1) %>%
+  mutate(Source = factor(Source))
+```
+
+
+### Step 3 and 4:
+
+Now, I will look for any duplicates in the genome and account for them by adding them together and then do the rest of the raw_count data manipulation so that it is in the proper format for DESeq2 analysis.
+
+```{r}
+
+#Check the # of duplicates
+sum(duplicated(raw_counts$GeneID))
+
+#There are no duplicates, therefore we can move to the next step.
+
+
+raw_counts <- raw_counts %>%
+  column_to_rownames(., var = "GeneID") #automatically removes GeneID
+
+#Checking to make sure the rownames of the meta data is equal to the colnames of the raw_counts to make sure the Sample IDs are matched up.
+identical(rownames(meta_data), colnames(raw_counts))
+
+rownames(meta_data) == colnames(raw_counts)
+```
+
+
+### Step 5
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = raw_counts, colData = meta_data, design = ~ Source)
+
+
+
+#Optional to run a vst transformation 
+
+dds_vst <- vst(dds, blind = FALSE)
+```
+
+### Step 6
+
+In step 6, I will remove low RNA-seq counts that is probably just noise and won't have much significance. Its a balance between removing more low counts which speeds analysis time and reduces noise and removing too much which could lead you to ignore data that is actually relevant.
+```{r}
+dds <- dds[rowSums(counts(dds)) >= 10,]
+
+dds <- DESeq(dds)
+
+
+#Optional: Manually select the default baseline for the later downstream analysis to compare too
+
+dds$source <- relevel(dds$source, ref = "normal colon")
+
+```
+
+
+
+### Step 7
+
+Now we will convert the DESeqDataSet into results by choosing the alpha value as well as the contrast to identify what we are comparing. In this example, we will be comparing normal colon samples (n=3) to primary colorectal cancer. If we want to change the contrasts, we can change to compare "normal colon" to "metastasized cancer" as an example.
+
+```{r}
+res <- results(dds, alpha = 0.05, contrast = c("Source", "metastasized cancer", "normal colon"))
+
+results <- as.data.frame(res)
+```
+
+
+### Step 8
+
+Now, we hae the results into a readable dataframe, we can further manipulate it and make some nice graphs.
+```{r}
+results <-  results %>%
+  mutate(Significant = ifelse(padj < 0.05, "Yes", "No")) %>%
+  rownames_to_column(., var = "GeneID") %>%
+  mutate(DEG_Status = if_else(log2FoldChange > 1, "Upregulated","Downregulated")) %>%
+  mutate(GeneID = as.integer(GeneID)) %>%
+  left_join(.,Gene_Names, by = "GeneID") %>%
+  dplyr::select(-GeneID)
+```
+
+
+### Step 8 Continued
+
+I am going to try to duplicate a graph in the word document I got from the scientific paper or at least as close as possible to the graph in question. Even if it doesn't look exactly the same, I want the data to be the same.
+
+```{r}
+r <- results %>%
+  ggplot(aes(x=log2FoldChange, y = padj))+
+  geom_point(aes(color = Significant))+
+  geom_vline(xintercept = 1)+
+  geom_vline(xintercept = -1)+
+  labs(title = "Log2FoldChange compared to p-adjusted value for comparing \n normal colon to metastasized cancer",
+       x = "Log 2 Fold Change", y = "p-adjusted values")+
+  scale_color_manual(values = c("tomato3", "navyblue"),
+                     labels = c("No","Yes"))+
+  theme_classic()+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+print(r)
+```
+
+## Step 9: Save the graph
+```{r}
+png(filename = file.path(here(),"Kim_et_al_2014","volcanoplot_normal_to_metastasized_colon.png"),
+    width = 480, height = 480)
+
+print(r)
+
+dev.off()
+```
+
+

@@ -1,0 +1,95 @@
+---
+title: "Kim_2014_PCA"
+output: html_document
+---
+
+In this short example, I am going to take the raw_count data that I downloaded and will run PCA analysis.  At this point in time, I have not yet identified or figured out how to transform the raw counts into TPM or normalized counts which would be more accurate when I want to do this type of analysis. It has been a little while, so I am going to try to do it from memory, but I can always look up online to refresh my memory. 
+
+```{r}
+library(tidyverse)
+library(MASS)
+library(factoextra)
+library(GEOquery)
+library(here)
+
+#Downloaded on May 4th 2026
+raw_counts <- read_tsv(gzcon(url("https://www.ncbi.nlm.nih.gov/geo/download/?type=rnaseq_counts&acc=GSE50760&format=file&file=GSE50760_raw_counts_GRCh38.p13_NCBI.tsv.gz")))
+
+meta_data <- getGEO(
+  GEO = "GSE50760",
+  GSEMatrix = TRUE
+)
+
+#Extract Metadata
+meta_data <- pData(phenoData(meta_data[[1]]))
+
+GeneNames <- read_tsv(gzcon(url("https://www.ncbi.nlm.nih.gov/geo/download/?format=file&type=rnaseq_counts&file=Human.GRCh38.p13.annot.tsv.gz")))
+
+Gene_Names <- GeneNames %>% dplyr:: select(GeneID, Symbol)
+```
+
+#Reformat the metadata 
+
+In this step, basic manipulation of the meta_data is done so that later analysis is easier when faceting by treatment or cell type.
+```{r}
+meta <- meta_data
+
+#When doing PCA after loading the MASS library, you will need to manually use the dplyr::select() when using that function
+meta <- meta %>%
+  dplyr::select(title, geo_accession, source_name_ch1, characteristics_ch1)
+```
+
+#Reformat the main dataset, in this case its the raw_counts
+
+Since I do not have any NA values that will cause a major issue, I can move right ahead to other manipulation of data to put it into the right format. However, since PCA analysis will not want to have any categorical data in the matrix that is imported into the dataset, I will need to manipulate it later so that I can do grouping and other analysis so I can differentiate by cell type. I explain what I do in each step below:
+
+```{r}
+raw_counts2 <- raw_counts %>%
+  left_join(., Gene_Names, by = "GeneID") %>% #Add Gene Names
+  dplyr::select(-"GeneID") %>% #Remove GeneID and Keep Gene Name Symbols
+  group_by(Symbol) %>% 
+  summarise(across(where(is.numeric), sum)) %>% #Since there are some multiple transcript of the same gene, I may decide to sum them into a single count for each gene symbol
+  ungroup() %>%
+  column_to_rownames(., var = "Symbol") %>% #All the categorical data will need to be removed from this dataset
+  t() #The Data will need to be transposed at the end so that it runs the principle component analysis for each Gene in grouping the cells
+
+counts_with_facets <- raw_counts2 %>%
+  as.data.frame() %>%
+  rownames_to_column(.,var = "Sample") %>%
+  left_join(.,meta, by = c("Sample" = "geo_accession")) 
+
+#Since scaling can not occur with columns with no counts, I will remove them since if they have no counts, they won't impact the results anyways
+
+vector <- colSums(raw_counts2) > 0
+
+#raw_counts2 <- raw_counts[ , vector]
+```
+
+#Run the Principle Component Analysis
+
+```{r}
+rawcounts_pca <- prcomp(raw_counts2, scale = FALSE)
+
+summary(rawcounts_pca)
+
+```
+
+
+#Scree plot
+
+The Scree plot show how each principle component represents what percentage of the overal data. By using the summary() on the pca object, you can see that the PC1 has about 63% of the variance in the data and PC2 has 19%, so combined they have about 82% of the total variation of the data explained.
+```{r}
+fviz_eig(rawcounts_pca,
+         addlabels = TRUE)
+```
+
+#Biplot
+
+This is the more important graph where I can look at the graph of the principle components of the data analysis. I wanted to remove the labels for the purposes of looking at the distribution of the different cell types. I will be honest that I recall there being better separation of this data than I can see here, so I wonder if I did something wrong.
+
+```{r}
+fviz_pca_biplot(rawcounts_pca,
+                label = "none",
+                habillage = counts_with_facets$source_name_ch1)
+```
+
