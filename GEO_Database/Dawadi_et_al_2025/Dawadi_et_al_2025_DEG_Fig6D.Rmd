@@ -1,0 +1,156 @@
+---
+title: "Dawadi_et_al_2025"
+output: html_document
+---
+
+Link to github with "data" that I will be using: https://github.com/dprabin25/BegineersRNA-Seq
+
+#Paper that discusses RNA-SEQ practices for begginers
+https://pmc.ncbi.nlm.nih.gov/articles/PMC12599993/
+
+To be clear, this is a very small dataset but I want to be able to reproduce everything here and eventually move on to better and more detailed files/analysis.
+
+General Pipeline:
+) Import Data
+2) Format the Meta Data
+3) Format the Raw Count Data and look for potential duplicates to account for 
+4) For the DeSEQ2 function, make sure the meta_data rownames are equal to the sample IDs which should be *identical* to the column names of the raw counts
+5) Run the DeSEQ2 Analysis (it needs raw counts not normalized counts because it automatically normalizes the counts for us)
+6) Optional? --> Remove any GeneIDs where the rowSums of the raw counts is very small to speed up the analysis. If the raw counts # is very low, its unlikely to have any major effect on the differential expression analysis
+7) Convert the DeSEQ2 analysis into a results object 
+8) Convert the results object into a dataframe
+9) Make graphs as wanted/needed
+
+
+
+#Step 1: Activate Appropriate Libraries
+
+I include many, but not all, of the libraries here
+```{r}
+library(tidyverse)
+library(TCGAbiolinks)
+library(survminer)
+library(survival)
+library(SummarizedExperiment)
+library(DESeq2)
+library(annotables)
+library(here)
+```
+
+#Step 2: Import the data
+```{r}
+file <- file.path(here(), "/GEO_Database/Dawadi_et_al_2025/Data/raw_counts.csv")
+
+Dawadi_raw_counts <- read.csv(file =file)
+
+meta_data_dawadi <- read.csv(file.path(here(),"/GEO_Database/Dawadi_et_al_2025/Data/MetaData.csv")) 
+
+meta_data_dawadi <- meta_data_dawadi %>%
+ dplyr::rename(Biopsy_Site = `Sample.Characteristic.biopsy.site.`)
+
+
+```
+
+#Step 3: Check to make sure the Sample IDs in the metadata matches the Sample IDs in the raw_count data
+```{r}
+#Check to make sure the samples IDs in the metadata matches the raw_count
+
+Dawadi_raw_counts_2 <- Dawadi_raw_counts %>% column_to_rownames(., var = "Gene.ID") %>% dplyr::select(-Gene.Name)
+
+identical(meta_data_dawadi$Run, colnames(Dawadi_raw_counts_2))
+          
+```
+
+#Step 4: Look for duplicates in the raw_counts
+
+Look for any duplicates in the raw_counts and decide what I want to do with them. One option is to just add them all together since its likely slightly different transcripts for the same gene. However, it depends on what one wants to look at.
+
+```{r}
+sum(duplicated(Dawadi_raw_counts_2$Gene.ID))
+
+# There are no duplications which makes this easy
+
+
+```
+
+#Step 5: Run the DESeq2 Analysis
+
+```{r}
+DESEQ <- DESeqDataSetFromMatrix(countData = Dawadi_raw_counts_2,
+                                colData = meta_data_dawadi,
+                                design = ~ Biopsy_Site)
+
+#Estimate size factors, although I think the DESeq() already does this?
+#DESEQ < estimateSizeFactors(DESEQ) 
+
+#Create the vst transformed data for later analysis
+vst_dawadi <- vst(DESEQ, blind = TRUE)
+vst_dawadi <- as.data.frame(assay(vst_dawadi))
+
+vst_dawadi <- vst_dawadi %>%
+  bind_cols(., Dawadi_raw_counts %>% dplyr::select(Gene.ID, Gene.Name))
+#write.csv(vst_dawadi, file = file.path(here(),"/GEO_Database/Dawadi_et_al_2025/Data/vst_transformed_counts.csv"))
+```
+
+##Step 6:
+
+Remove optional low counts which might increase the noise of the data.
+```{r}
+DESEQ <- DESEQ[rowSums(counts(DESEQ)) >= 10,]
+
+DESEQ <- DESeq(DESEQ)
+```
+
+#Step 7 and 8: Convert the DESEQ object into a results object
+
+In this example, I am very quickly converting the DESeq object into results that can be read where I set the alpha value to 0.05 and select what is being compared to what group. In this example, the "primary tumor" is being compared to "normal" where the "primary tumor" comes before the "normal" in the string.
+```{r}
+dawadi_results <- results(DESEQ, alpha = 0.05, contrast = c("Biopsy_Site", "primary tumor", "normal"))
+dawadi_results2 <- as.data.frame(dawadi_results)
+
+write.csv(dawadi_results2, file = file.path(here(),"/GEO_Database/Dawadi_et_al_2025/Data/DEG_PrimaryTumor_vs_Normal.csv"))
+```
+
+
+#Step 9: Make pretty graphs
+
+In this case, I am going to reproduce a graph that they have in DataSheet1 as their example. When I make these graphs, they are ever so slightly different (pecifically with the baseMean and padj values being slightly different than the data in the Dawadi 2025 paper. I am not exactly sure why that is the case, but I think its because the R versions used are slightly different which gives slightly different result. )
+
+```{r}
+dawadi_results2 %>%
+  mutate(DEG_Status = case_when(
+    log2FoldChange > 1 & padj < 0.05 ~ "Upregulated",
+    log2FoldChange < 1 & padj < 0.05 ~ "Downregulated",
+    TRUE ~ NA)) %>%
+  ggplot(aes(x=log2FoldChange, y = -log(padj), color = DEG_Status))+
+  geom_point()+
+  labs(title = "Primary Tumor vs Normal",
+       y = "-Log10 Adjusted P-value",
+       x = "Log2 Fold Change")+
+  theme_bw() +
+  scale_color_manual( values = c("Downregulated" = "red", "Upregulated" = "lightgreen"))+
+  xlim(-10,10)+
+  geom_vline(xintercept = c(-1,1), linetype = "dashed", color = "blue")
+
+ggsave("Primary Tumor vs Normal Fig6D.png",
+       path = file.path(here(), "/GEO_Database/Dawadi_et_al_2025"), 
+       width = 4, height = 4)
+```
+
+#Plot an MA Plot
+```{r}
+plotMA(dawadi_results, returnData = TRUE) %>%
+  ggplot(aes(x=mean, y = lfc, color = isDE))+
+  geom_point()+
+  scale_x_log10()+
+  theme_bw()+
+  ylim(-6,6)
+
+plotMA(dawadi_results,
+       main = "Primary Tumor vs Normal")
+
+ggsave("Primary Tumor vs Normal MAplot Fig6B.png",
+       path = file.path(here(), "/GEO_Database/Dawadi_et_al_2025"), 
+       width = 4, height = 4)
+
+```
