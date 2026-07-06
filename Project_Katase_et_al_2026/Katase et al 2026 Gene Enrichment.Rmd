@@ -1,0 +1,334 @@
+---
+title: "Katase et al 2026 Gene Enrichment"
+output: html_document
+---
+
+In Figure 3a through 3d in Katase et al 2026, they used ShinyGo 0.85 to produce Gene Set Enrichment Analysis and this work will be reproduced. The first method to attempt to reproduce the work in Katase et al 2026 will be by using a common R package for GSEA analysis known as clusterprofiler. Alternatively, the other analysis option is to go to ShinyGo v0.85 and perform that analysis.
+
+### Activate Relevant Libraries and import Gene Symbols
+
+The relevant R packages will be turned on and the file pathways for the importation of data or export of figures.
+
+```{r}
+library(here)
+library(annotables)
+library(tidyverse)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+
+
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+Gene_Symbols_annotables <- grch38 %>% dplyr::select(ensgene, entrez, symbol) %>% distinct()
+
+```
+
+## Import the Differential Gene Expression Results
+
+The Different Expression Analysis previously performed by using DESeq() results are imported and joined with the Gene Symbols and then filtered for genes that have differential expression that is statistically significant. This is important because we only care about gene expression changes that we can confidently say is real.
+
+```{r}
+results <- readRDS(file = file.path(Data_Import, "DEG_results_Primary_vs_Normal.rds"))
+
+
+#Extract the Log2FoldChange and Gene Symbol
+
+Gene_Enrichment <- results %>% 
+      rownames_to_column(., var = "ensgene") %>%
+      left_join(., Gene_Symbols_annotables, by = "ensgene") %>%
+      dplyr::select(symbol, log2FoldChange, padj)
+
+#To avoid bias, I need to make sure I have all the possible genes for when I use them in clusterprofiler
+Full_Gene_Names <- Gene_Enrichment$symbol
+#Full_Gene_Names <- Full_Gene_Names %>% dplyr::select()
+
+#Drop NA values and remove gene with no statistically significant changes in differential expressio
+Gene_Enrichment <- Gene_Enrichment %>% drop_na() %>% filter(padj < 0.05)
+      
+#Split the enrichment into upregulated and downregulated gene to identify how the pathways may be different and arrange by descending Log2FoldChange for later analyis
+
+upregulated_Gene_enrichment <- Gene_Enrichment %>% filter(log2FoldChange > 0) %>% arrange(desc(log2FoldChange)) %>% filter(symbol != "")
+downregulated_Gene_enrichment <- Gene_Enrichment %>% filter(log2FoldChange < 0) %>% arrange(desc(log2FoldChange)) 
+
+
+
+```
+
+
+
+#Get background gene sets
+
+I can either download the .gmt files directly from the Broad Institute from [USCB](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp). Furthermore, it actually looks like they have their own package to run this type of analysis which I can check out. In this first codechunk, I use the Hallmark gene annotation set from the msigdbr package.
+
+```{r}
+library(msigdbr)
+
+#Choose teh gene set to use which will determine which the categories
+Gene_categories <- msigdbr(species = "Homo sapiens", collection = "H")
+
+Gene_categories <- Gene_categories %>% dplyr::select(gs_name, gene_symbol)
+```
+
+In this code chunk, I have two different mechanisms to import the Gene annotation file into R to use for the gene enrichment analysis specific to the Katase et al 2026 paper. In order to reproduce Figure 3a-3d from Katase et al 2026, the gene annotation files from the [Broad Institute](https://data.broadinstitute.org/gsea-msigdb/msigdb/release/2025.1.Hs/) were downloaded and imported into R. The alternative is to use the msigbr package to import the files. 
+
+```{r}
+GO_BP1 <- read.gmt(file.path(here(),"GMT annotation file", "c5.go.bp.v2025.1.Hs.symbols.gmt"))
+#GO_BP <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "C5", "GO:BP")
+#GO_BP <- GO_BP %>% dplyr::select(gs_name, gene_symbol)
+
+GO_CC1 <- read.gmt(file.path(here(),"GMT annotation file", "c5.go.cc.v2025.1.Hs.symbols.gmt"))
+#GO_CC <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "C5", "GO:CC")
+#GO_CC <- GO_CC %>% dplyr::select(gs_name, gene_symbol)
+
+GO_MF1 <- read.gmt(file.path(here(),"GMT annotation file", "c5.go.mf.v2025.1.Hs.symbols.gmt"))
+#GO_MF <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "C5", "GO:MF")
+#GO_MF <- GO_MP %>% dplyr::select(gs_name, gene_symbol)
+
+KEGG_LEGACY1 <- read.gmt(file.path(here(),"GMT annotation file", "c2.cp.kegg_legacy.v2025.1.Hs.symbols.gmt"))
+#KEGG_LEGACY <- msigdbr(db_species = "HS", species = "Homo sapiens", collection = "C2", "CP:KEGG_LEGACY")
+#KEGG_LEGACY <- KEGG_LEGACY %>% dplyr::select(gs_name, gene_symbol)
+```
+
+touch Katase_et_al_2026/.gitkeep
+### Run the ClusterProfiler Analysis to run the Over Representation Analysis
+
+Now, a Gene Enrichment Analysis will be performed using the enricher() function where I use the relevant gene annotation sets that were imported previously to generate the analysises and convert them into data frames. After the result for the GOBP, GOCC, GOMF and KEGG Legacy gene annotation sets are obtained, graphs will be created to reproduce the 4 figures.
+
+```{r}
+GO_BP_results <- enricher(gene = upregulated_Gene_enrichment$symbol,
+         pvalueCutoff = 0.01,
+         TERM2GENE = GO_BP1) 
+GO_BP_results <- as.data.frame(GO_BP_results)
+
+####
+
+GO_CC_results <- enricher(gene = upregulated_Gene_enrichment$symbol,
+         pvalueCutoff = 0.01,
+         TERM2GENE = GO_CC1) 
+GO_CC_results <- as.data.frame(GO_CC_results)
+
+####
+
+
+GO_MF_results <- enricher(gene = upregulated_Gene_enrichment$symbol,
+         pvalueCutoff = 0.01,
+         TERM2GENE = GO_MF1)
+GO_MF_results <- as.data.frame(GO_MF_results)
+
+####
+
+
+KEGG_LEGACY_results <- enricher(gene = upregulated_Gene_enrichment$symbol,
+         pvalueCutoff = 0.01,
+         TERM2GENE = KEGG_LEGACY1)
+KEGG_LEGACY_results <- as.data.frame(KEGG_LEGACY_results)
+
+```
+
+Copy to clipboard so I can copy and paste into ShinyGo
+
+clip <- pipe("pbcopy", "w")                       
+write.table(GO_BP1$gene, file=clip, sep = '\t', row.names = FALSE)  
+close(clip)
+
+clip <- pipe("pbcopy", "w")                       
+write.table(upregulated_Gene_enrichment$symbol, file=clip, sep = '\t', row.names = FALSE)  
+close(clip)
+
+
+#Reproduce Fig 3a
+
+```{r}
+GO_BP_results  <- GO_BP_results %>%
+      mutate(Description = str_replace(Description, c("GOBP|GOCC|GOMP"),""),
+             Description = str_replace_all(Description, "_"," ")) %>%
+      arrange(., (Count)) 
+
+
+order <- GO_BP_results$Description
+
+png(filename = file.path(Figure_Export, "GSEA_GOBP_Fig3a.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_BP_results  %>% 
+      filter(row_number() < 11) %>%
+      mutate(Description = factor(Description, levels = order)) %>%
+      ggplot(aes(x=Description, y = Count, fill = Count))+
+            geom_col() +
+            coord_flip()+
+      scale_fill_gradient(low = "yellow", high = "red")+
+      labs(title = "GOBP", y = "Number of Genes", x = "", fill = "Number of Genes")+
+      theme(plot.title = element_text(face = "bold"))
+
+dev.off()
+```
+
+
+
+#Reproduce Fig 3b
+
+```{r}
+GO_CC_results  <- GO_CC_results %>%
+      mutate(Description = str_replace(Description, c("GOBP|GOCC|GOMP"),""),
+             Description = str_replace_all(Description, "_"," ")) %>%
+      arrange(., (Count))
+
+order <- GO_CC_results$Description
+
+png(filename = file.path(Figure_Export, "GSEA_GOCC_Fig3b.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_CC_results  %>% 
+      filter(row_number() < 11) %>%
+      mutate(Description = factor(Description, levels = order)) %>%
+      ggplot(aes(x=Description, y = Count, fill = Count))+
+            geom_col() +
+            coord_flip()+
+      scale_fill_gradient(low = "yellow", high = "red")+
+      labs(title = "GOCC", y = "Number of Genes", fill = "Number of Genes", x = "")+
+      theme(plot.title = element_text(face = "bold"))
+      
+     dev.off()
+```
+
+
+#Reproduce Fig 3c
+
+```{r}
+GO_MP_results  <- GO_MP_results %>%
+      mutate(Description = str_replace(Description, c("GOBP|GOCC|GOMF"),""),
+             Description = str_replace_all(Description, "_"," ")) %>%
+      arrange(., (Count))
+
+order <- GO_MP_results$Description
+
+png(filename = file.path(Figure_Export, "GSEA_GOMP_Fig3c.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_MP_results  %>% 
+      filter(row_number() < 11) %>%
+      mutate(Description = factor(Description, levels = order)) %>%
+      ggplot(aes(x=Description, y = Count, fill = Count))+
+             geom_col() +
+            coord_flip()+
+      scale_fill_gradient(low = "yellow", high = "red")+
+      labs(title = "GOMP", y = "Number of Genes", fill = "Number of Genes", x = "")+
+      theme(plot.title = element_text(face = "bold"))
+
+dev.off()
+```
+
+
+
+#Reproduce Fig 3d
+
+```{r}
+KEGG_LEGACY_results  <- KEGG_LEGACY_results %>%
+      mutate(Description = str_replace(Description, c("GOBP|GOCC|GOMP|KEGG"),""),
+             Description = str_replace_all(Description, "_"," ")) %>%
+      arrange(., (Count))
+
+order <- KEGG_LEGACY_results$Description
+
+png(filename = file.path(Figure_Export, "GSEA_KEGGLEGACY_Fig3c.png"),
+    width = 1024, height = 768, units = "px")
+
+KEGG_LEGACY_results  %>% 
+      filter(row_number() < 11) %>%
+      mutate(Description = factor(Description, levels = order)) %>%
+      ggplot(aes(x=Description, y = Count, fill = Count))+
+            geom_col() +
+            coord_flip()+
+      scale_fill_gradient(low = "yellow", high = "red")+
+      labs(title = "KEGG LEGACY", y = "Number of Genes", fill = "Number of Genes", x = "")+
+      theme(plot.title = element_text(face = "bold"))
+
+dev.off()
+```
+
+
+
+### Run Alternative Analysises
+
+While the above chunks of code reproduce or attempt to reproduce Figures 3a-3d in Katase et al 2026, there can be alternative analysises through the use of the more generic hallmark gene annotation sets. Rather than just looking at which genes are enriched from upregulation, we can also identify which genes are enriched during the downregulation in the Head and Neck Cancer tumors compared to normal tissue. In this case, we run the enricher() function on the upregulated and downregulated genes and produce the relevant plots. Another alternative is to run the 4 gene annotation sets on the downregulated genes  rather than just the upregulated genes
+
+```{r}
+#Upregulated
+upregulated_enrichment_results <- enricher(gene = upregulated_Gene_enrichment$symbol,
+         pvalueCutoff = 0.05,
+         TERM2GENE = Gene_categories)
+
+upregulated_enrichment_results <- as.data.frame(upregulated_enrichment_results)
+
+#Downregulated
+downregulated_enrichment_results <- enricher(gene = downregulated_Gene_enrichment$symbol,
+         pvalueCutoff = 0.05,
+         TERM2GENE = Gene_categories)
+
+downregulated_enrichment_results <- as.data.frame(downregulated_enrichment_results)
+
+
+```
+
+
+This will produce a plot for the Over Enrichment Analysis for upregulated genes using the Hallmark gene annotation set.
+
+```{r}
+upregulated_enrichment_results <- upregulated_enrichment_results %>%
+      mutate(Description = str_replace(Description, "HALLMARK",""),
+             Description = str_replace_all(Description, "_"," ")) %>%
+      arrange(., Count)
+
+order <- upregulated_enrichment_results$Description
+
+upreg_barplot <- upregulated_enrichment_results %>%
+      mutate(Description = factor(Description, levels = order)) %>%
+      ggplot(aes(x=Description, y = Count, fill = Count))+
+            geom_col() +
+            coord_flip()+
+      scale_fill_gradient(low = "yellow", high = "red")+
+      labs(title = "Hallmark for Upregulated Genes", y = "Number of Genes", fill = "Number of Genes", x = "")+
+      theme(plot.title = element_text(face = "bold"))
+
+png(filename = file.path(Figure_Export, "Top_10_upregulated_Genes_Hallmark.png"),
+    width = 1024, height = 768, units = "px")
+
+upreg_barplot
+
+dev.off()
+
+```
+
+This will produce a plot for the Over Enrichment Analysis for downregulated genes using the Hallmark gene annotation set.
+
+```{r}
+downregulated_enrichment_results <- downregulated_enrichment_results %>%
+      mutate(Description = str_replace(Description, "HALLMARK",""),
+             Description = str_replace_all(Description, "_"," ")) %>%
+      arrange(., Count)
+
+order <- downregulated_enrichment_results$Description
+
+downreg_barplot <- downregulated_enrichment_results %>%
+      mutate(Description = factor(Description, levels = order)) %>%
+      ggplot(aes(x=Description, y = Count, fill = Count))+
+            geom_col() +
+            coord_flip()+
+      scale_fill_gradient(low = "yellow", high = "red")+
+      labs(title = "Hallmark for Downregulated Genes", y = "Number of Genes", fill = "Number of Genes", x = "")+
+      theme(plot.title = element_text(face = "bold"))
+
+png(filename = file.path(Figure_Export, "Top_10_downregulated_Genes_Hallmark.png"),
+    width = 1024, height = 768, units = "px")
+
+downreg_barplot
+
+dev.off()
+```
+
+

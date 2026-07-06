@@ -1,0 +1,242 @@
+---
+title: "Katase et al 2026 Reproduction Figure 1 Differential Gene Expression"
+date: "June 7th, 2026"
+output: html_document
+---
+
+
+# Katase et al 2026 Figure 1a Replication
+
+The goal for this is to replicate Figure 1a from Katase et al 2026. In this paper, they use DESeq() among other packages to analyze the Head and Neck Cancer cohort from the TCGA-HNSC (The Cancer Genome Atlas) consortium. This file will try to reproduce Figure 1 of the Differential Expression that was produced in [Katase et al 2026](https://www.cureus.com/articles/423507-differentially-expressed-genes-in-head-and-neck-squamous-cell-carcinoma-exploratory-research-using-the-cancer-genome-atlas-tcga-rna-sequence-data-and-deseq2-package#!/). Furthermore, the analysis that is done here will used to perform later analysis and reproduce other figures in Katase et al 2026. 
+
+
+###Step 1): Activate the proper libraries
+```{r}
+library(tidyverse)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(DESeq2)
+library(annotables)
+library(here)
+
+#Create a Data Folder (Once this is done, it doesn't need to be repeated)
+file.create(here(),"Data")
+
+#Create the Export File Pathways
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+
+###Step 2): Import the TCGA biolinks data (and we aren't going to be doing any data analysis where we only pick maybe 20 samples of each!)
+
+In Katase et al 2026, they download the raw counts that was already pre-processed from the TCGA-HNSC consortium. Through the use of the TCGAbiolinks package, the data will be extracted and downloaded and the output will be extracted from the object. Katase et al 2026 reported N=504 tumor samples and N=44. The data was downloaded on June 8th, 2026 for the first time.
+
+```{r}
+TCGA_HNSC <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "Transcriptome Profiling",
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  data.type = "Gene Expression Quantification",
+  sample.type = c("Primary Tumor","Solid Tissue Normal"), #I want to include both tumor tissue and solid normal tissue for this analysis!
+  access = "open"
+)
+
+#We can use this output later in the analysis so that we can later analysis
+output <- getResults(TCGA_HNSC)
+```
+
+
+###Step 3: Import the clinical metadata
+
+Along with the raw counts downloaded from the TCGA-HNSC cohort, the clinical data for each of the samples is important for later analysis should be downloaded.
+
+```{r}
+clinical_data <- GDCquery_clinic("TCGA-HNSC",
+                                 type = "clinical", save.csv = FALSE)
+
+
+#Trying to figure out what metric were used to get 504 tumor samples and 44 normal tissue sample. I still have N=520, but I can get closer at N=509
+clinical_data %>% drop_na(age_at_diagnosis, tumor_grade, ajcc_clinical_n, ajcc_clinical_t, ajcc_clinical_stage, sex_at_birth, vital_status, ajcc_clinical_m, days_to_last_follow_up, days_to_diagnosis) %>% select(classification_of_tumor) %>% table()
+
+
+#age, gender, grade, stage, T stage (T), lymph node metastasis (N), and overall survival status
+```
+
+###Step 4: Download Data from the new query so that I can extract the counts
+
+Download the data from the object for the TCGA-HNSC dataset so then it can be extracted in the next step.
+
+```{r cache= TRUE}
+
+GDCdownload(TCGA_HNSC)
+```
+
+###Step 5: Extract the counts from the dataset
+
+The raw counts will be extracted from the object and then converted into a dataframe for downstream analysis. Katase et al 2026 reported N=504 tumor samples and N=44 normal tissue samples that they used in their analysis. In this cohort, the normal tissue samples come from patients who have head and neck tumors, but they selected healthy normal tissue for comparison purposes. However, there are 528 known cases per the TCGA-HNSC portal from The Cancer Genome Atlas. With respect to cases that have data on mRNA from solid tumors, there are N=520 for the tumor samples and N=44 for the normal tissues, consistent with other papers such as [Rendelmen et al 2019](10.1186/s12859-019-2929-8). However, this difference in the # of patients could lead to differences in the results. However, Katase et al 2026 did not report how they got N=504 for the tumor samples and do not have any exclusion criteria. After looking to drop samples with potentially missing results in key variables, we were unable to reproduce the N=504 for tumor cases. 
+
+Consequently, any differences in the analysis will likely be to this difference in the number of patients. Another potential difference at this point is that this analysis is being run on R 4.5.2 rather than R 4.3.2 and DESeq() has a slightly older version. If the criteria for the patient samples used is identified, the analysis will be re-run and if there are still differences, the old versions of R and DESeq() package will be used to more accurately hit the results.
+
+```{r}
+hnsc_data <- GDCprepare(TCGA_HNSC, summarizedExperiment = TRUE) #Extract the data using GDCprepare
+hnsc_matrix <- assay(hnsc_data, "unstranded") #Convert to Data Frame. 
+
+# If I want to extract the TPM_unstranded counts, I can put in "tpm_unstranded" to extract the TPM counts which I did and then saved as an .RDS object so I don't need to run this step every time I want to access that data.
+
+
+## For easier import and analysis in the future, I just exported the raw_counts so I don't need to run this every single time I want to analysis.
+
+#write.csv(hnsc_matrix, file = file.path(here(), "TCGA_Database/Katase et al 2026/Data/raw_counts_hsnc.csv"))
+#saveRDS(hnsc_matrix, file.path(Data_Import,"raw_unstranded_counts.rds"))
+```
+
+
+### Step 6: Conversion of data to a dataframe
+
+```{r}
+hnsc_metadata <- as.data.frame(rowData(hnsc_data))
+hnsc_coldata <- as.data.frame(colData(hnsc_data))
+
+#saveRDS(hnsc_coldata, file.path(Data_Import,"hnsc_coldata.rds"))
+#saveRDS(hnsc_metadata, file.path(Data_Import,"hnsc_metadata.rds"))
+```
+
+
+###Step 7: Check if the hnsc_coldata that has the sample IDs (hnsc_coldata) in the rownames is equal to the colnames of the raw_count data (hnsc_matrix). These need to match for the DESeq2 package function to work properly.
+
+For the DESeq() package to work appropriately, it needs the columns of the count_matrix which are correlated with sample IDs, in this example is hnsc_matrix, to be exactly the same as the rownames of the coldata which aligns the sample IDs. This is needed so that DESeq() knows how to compare the expression of the mRNA from two different groups, such as primary tumors vs normal tissue. Furthermore, if there are any duplicates in the row names, that needs to be handled because duplicate gene might cause problems for the analysis. One method and option is to group by the gene or ENS ID and then sum up or mean the counts for later analysis. This was performed in this to account for the occasional duplication of a rowname, but it does not change the analysis much because in this case, the additional duplicates had 0s.
+
+```{r}
+#Checking to make sure the raw counts colunm names is equal to the rownames of the coldata
+identical(colnames(hnsc_matrix), rownames(hnsc_coldata))
+
+#Check if there are duplicated genes or transcripts (In this case there are 0)
+sum(duplicated(rownames(hnsc_matrix)))
+
+#Although the above value is 0, its because there are multiple transcripts of the same gene which we probably want to remove, so we may want to remove and combine them. I decided to basically combine the sum of the transcripts
+
+#Conversion to a dataframe
+hnsc_matrix <- hnsc_matrix %>%
+  as.data.frame() 
+
+#Used to remove the ends that differentiates the transcripts but I am doing gene level, not transcript level analysis.
+hnsc_matrix <- hnsc_matrix %>%
+  rownames_to_column(., var = "ensgene") %>% 
+  mutate(ensgene = str_remove(ensgene,"\\..*")) %>% #Used to remove the ends that differentiates the transcripts but I am doing gene level, not transcript level analysis.
+  group_by(ensgene) %>%
+  summarize(across(everything(), mean)) %>% #Changed to mean from sum
+  column_to_rownames(., var = "ensgene")
+
+```
+
+
+#Step 8: Run the DESEQ2 analysis
+
+Now, the DESeq() function can be run and an object will be created.
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = hnsc_matrix, #Where the matrix data is coming from
+                              colData = hnsc_coldata, 
+                              design =  ~ sample_type)
+```
+
+#Step 9: DESeq cleaning
+
+Although Katase et al 2026 did not provide their code, so we are unsure if they removed low counts, it seems to be good practice to remove low couts so genes where the total counts is less than 10 are removed. This will speed up downstream analysis and remove background that make affect results.
+
+```{r}
+dds <- dds[rowSums(counts(dds)) >= 10,]
+
+dds <- DESeq(dds)
+
+#saveRDS(dds, file.path(Data_Import, "dds_object.rds"))
+
+vst_set <- as.data.frame(assay(vst(dds)))
+
+#To save the vst data
+#write.csv(vst_set, file = file.path(here(),"/TCGA_Database/Katase et al 2026/Data/vst_transformed_data.csv"))
+#saveRDS(vst_set, file.path(Data_Import, "vst_transformed_data.rds"))
+```
+
+
+
+### Step 10
+
+Conversion of the results into a readable data frame. Furthermore, the contrasts will be set for comparison of Solid Tissue Normal to Primary Tumor during the conversion of the DESeq object into a readable dataframe.
+
+```{r}
+res <- results(dds, alpha = 0.05, contrast = c("sample_type", "Primary Tumor", "Solid Tissue Normal"))
+
+results <- as.data.frame(res)
+
+#saveRDS(results, file.path(Data_Import,"DEG_results_Primary_vs_Normal.rds"))
+```
+
+
+
+###Step 11: Generate a results datafram and do maipulation
+
+The results from the differential expression analysis using DEG analysis was converted and new variables were added, such as whether attaching the Gene Symbols instead of the ENS ID for comparison of expression as well as determining whether the change in expression is statistically significant. This result dataframe can then be used to make the Volcano plot for comparing differential gene expression.
+
+```{r}
+Gene_Symbols <- grch38 %>% select(ensgene, symbol)
+
+results <-  results %>%
+  mutate(Significant = ifelse(padj < 0.05, "Yes", "No")) %>%
+  rownames_to_column(., var = "GeneID") %>%
+  mutate(GeneID = str_remove(GeneID,"\\..*")) %>%
+  rename(GeneID = "ensgene") %>%
+  left_join(.,Gene_Symbols, by = "ensgene") %>%
+  mutate(DEG_Status = case_when(
+   padj < 0.05 & abs(log2FoldChange) > 1 ~ "p-value and log2 FC",
+   padj < 0.05  ~ "p-value",
+   abs(log2FoldChange) > 1 ~ "Log2FC",
+    TRUE ~ "NS"))
+
+
+```
+
+###Step 12:  Reproduce Figure 1 from Katase et al 2026
+
+By looking at the data, the top 10 upregulated genes are the same, but the top 10 downregulated genes are slightly different than what Katase et al 2026 reported. This may be due to a slightly different R Version. However, the biggest factor that is likely causing this difference is that Katase et al 2026 reported N=504 for tumor samples and N=44 of normal tissue with some patient overlap (therefore, the same patient ID) with head and neck tumors. However, the TCGA-HNSC that I imported has more cases, with about 528 total cases but only N=520 for tumor samples and N=44 normal tissue samples with RNA-SEQ data to do the subsequent analysis, consistent with [Rendelmen et al 2019](10.1186/s12859-019-2929-8) which said that N=520 cases had solid tumor RNA-seq data. Since their code is not provided, it is unclear which additional patients were removed or how they started at N=504 for tumor samples and N=44 for normal tissue. This was only identified during the TPM count comparison between the Top 10 upregulated and Top 10 downregulated genes.
+
+The top 10 up regulated and down regulated genes were calculated by filtering for gene that had either greater than 1 or less than -1 with respect to logFoldChange, and then arranged by padj. Furthermore, likely due to slightly different versions of R and more importantly, due to a differing # of patient samples compared to Katase et al 2026, the calculated p values and baseMeans are slightly different. An example is for CA9 as a top upregulated gene, the padj in my data is 3.898640e-82 compared to the reported results in Katase et al 2026 as 5.35E-86. Similarly, our Log2FoldChange values were  5.856 and 5.859 respectively (rounded to the 3rd significant figure). However, with respect to the top 10 downregulated genes, it actually led to not all of the top 10 genes being the same as Katase et al 2026 although there was substantial overlap.
+
+```{r}
+upregulated <- results %>% filter(log2FoldChange > 1) %>% arrange(pvalue) %>% head(11) #Becuase one of the Ensgene IDs has no associate gene name, so I move to 11.
+downregulated <- results %>% filter(log2FoldChange < -1) %>% arrange(pvalue) %>% head(10)
+
+
+graph <- results %>% 
+  ggplot(aes(x=log2FoldChange, y = -log10(padj)))+
+  geom_point(aes(color=DEG_Status))+
+  theme_bw()+
+  geom_text(data = upregulated, aes(label = symbol, x = log2FoldChange, y = -log10(padj)), inherit.aes = FALSE)+
+  geom_text(data = downregulated , aes(label = symbol, x = log2FoldChange, y = -log10(padj)), inherit.aes = FALSE)+
+  scale_y_continuous(limits = c(0,125), breaks = seq(from = 0, to = 125, by = 25))+
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed")+
+  geom_vline(xintercept = -1, linetype = "dashed")+
+  geom_vline(xintercept = 1, linetype = "dashed")+
+  scale_color_manual(values = c("p-value and log2 FC" = "#ED1D23","NS" = "#434343", "p-value" = "#5B39E2", "Log2FC" = "#008500"))+
+  labs(title = "Differential Expression of Genes between normal tissue \n and HNSC cancer cells")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+print(graph)
+```
+
+###Save the graph as needed 
+
+The graph of the differential expression analysis to reproduce Figure 1 and put into the Figures Folder.
+
+```{r}
+png(filename = file.path(Figure_Export,"DEG_Fig1.png"),
+    width = 480, height = 480)
+
+print(graph)
+
+dev.off()
+```

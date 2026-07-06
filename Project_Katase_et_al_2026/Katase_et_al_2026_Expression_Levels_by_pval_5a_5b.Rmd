@@ -1,0 +1,563 @@
+---
+title: "Katase_et_al_2026_Expression_Levels_by_pval_5a_5b"
+output: html_document
+---
+
+
+In this file, the figures 5a) and 5b) from Katase et al 2026 will be reproduced where they take the TPM count for the TCGA HNSC dataset (and they are not clear where they get the tpm counts, but I am assuming that they are just downloading the tpm_unstranded counts). Originally, I attempted to use the raw unstranded counts and then convert them into TPM counts, but my results were different. Therefore, since they did not explain how they calculated or where they got the TPM counts, I instead downloaded and saved thed tpm_unstranded counts from TCGA (which I downloaded and the code that I used to download it in the DEG_Fig1.Rmd file). I saved the TPM unstranded counts as an .rds object to import for further analysis in the future.
+
+
+#Import the Raw Data and Activate relevant R Libraries
+
+```{r}
+library(here)
+library(tidyverse)
+library(annotables)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(DESeq2)
+library(rstatix)
+library(ggpubr)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+
+#Import the TPM Counts
+file1 <- file.path(Data_Import, "tpm_unstranded_raw.rds")
+
+tpm_counts_hnsc <- readRDS(file1)
+
+Gene_Symbols1 <- grch38 %>% dplyr::select(ensgene, entrez, symbol) %>% distinct()
+
+#Get Metadata, Coldata and Clinical Data
+
+clinical_data <- GDCquery_clinic("TCGA-HNSC", type = "clinical", save.csv = FALSE)
+
+hnsc_coldata <- readRDS(file = file.path(Data_Import,"hnsc_coldata.rds"))
+
+hnsc_metadata <- readRDS(file = file.path(Data_Import,"hnsc_metadata.rds"))
+
+##The following code in this segment only needs to be run if the coldata and metadata has not been previously saved and needed to be imported from TCGA website.
+
+TCGA_HNSC <- GDCquery(
+  project = "TCGA-HNSC",
+  data.category = "Transcriptome Profiling",
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  data.type = "Gene Expression Quantification",
+  sample.type = c("Primary Tumor","Solid Tissue Normal"), #I want to include both tumor tissue and solid normal tissue for this analysis!
+  access = "open"
+)
+
+hnsc_data <- GDCprepare(TCGA_HNSC, summarizedExperiment = TRUE) 
+hnsc_matrix <- assay(hnsc_data, "tpm_unstranded")
+
+#saveRDS(hnsc_matrix, file.path(Data_Import,"tpm_unstranded_raw.rds"))
+
+#hnsc_metadata <- as.data.frame(rowData(hnsc_data))
+
+#hnsc_coldata <- as.data.frame(colData(hnsc_data))
+
+```
+
+#Take the top 10 upregulated and downregulated genes (from the DEG_Fig1) file and use them to filter
+
+I am importing the Differential Expression Analysis results that was performed in DEG_Fig1 and extracting the top 10 upregulated and top 10 downregulated genes. After importing the Differential Expression Analysis, I was able to filter for the top 10 upregulated and top 10 downregulated genes.
+
+```{r}
+results <- readRDS(file.path(Data_Import, "DEG_results_Primary_vs_Normal.rds"))
+
+results <- results %>% 
+  rownames_to_column(., var = "ensgene") %>%
+  left_join(., Gene_Symbols1, by = "ensgene")
+
+
+#Becuase one of the Ensgene IDs has no associate gene name, so I move to 11 and removed the ensgene where there is no correlated symbol for the upregulated genes, but not downregulated genes.
+upregulated <- results %>% filter(log2FoldChange > 1) %>% arrange(pvalue) %>% filter(symbol != "") %>% head(10) 
+downregulated <- results %>% filter(log2FoldChange < -1) %>% arrange(pvalue) %>% filter(symbol != "") %>% head(10) 
+
+
+#Extract ensgene ID's
+
+upregulated_ID <- upregulated$ensgene
+downregulated_ID <- downregulated$ensgene 
+
+
+### I am specifically selecting the Top 10 downregulated genes from Katase et al 2026
+
+
+top_ten_down_Katase2026 <- c("LINC01829","NUCB2","AGFG2","IL12A-AS1","CAB39L", "CCL28","NOSTRIN","GPD1L","EMP1","SLC8A1-AS1")
+top_ten_down_Katase2026 <- Gene_Symbols1[Gene_Symbols1$symbol %in% top_ten_down_Katase2026, ]
+top_ten_down_Katase2026 <- unlist(as.vector(top_ten_down_Katase2026[1:10,1])) #Rows 1-10 and columnn 1 are chosen, so i exclude the extra NOSTRIN which is mapped to a slightly different ensgene ID
+
+
+
+```
+
+#Extract the TPM counts from the full TPM counts
+
+In this code, we converted the ensgene by removing the extra transcript values that will make it difficult to correlate the results. In the results object from the Differential Gene Expression Analysis does not have the extra transcript numbers. Therefore, I will need to remove the extra transcript values, since I am looking at gene level expression and not specific transcripts of a gene, there should be no difference in the results.
+
+```{r}
+#Convert the matrix into a dataframe and remove the extra values (correspondent to the transcript ID) since I am focusing on gene level, not transcript level
+tpm_counts_hnsc <- tpm_counts_hnsc %>%
+      as.data.frame() %>%
+      rownames_to_column(., var = "ensgene") %>% 
+      mutate(ensgene = str_remove(ensgene,"\\..*"))
+
+#Filter for the TPM counts for the top 10 upregulated and top 10 downregulated genes
+
+upregulated_counts <- tpm_counts_hnsc[tpm_counts_hnsc$ensgene %in% upregulated_ID, ]
+
+downregulated_counts <- tpm_counts_hnsc[tpm_counts_hnsc$ensgene %in% downregulated_ID, ]
+
+Katase2026_downregulated_counts <- tpm_counts_hnsc[tpm_counts_hnsc$ensgene %in% top_ten_down_Katase2026,]
+
+
+
+      
+```
+
+
+#Convert the matrixes into dataframes that can be used to make pretty graphs
+
+Now, the gene symbols needs to be added to the matrices so that the gene expression for the top 10 upregulated and downregulated genes can be compared. Furthermore, the dataframes and matrices were manipulated were put into a format that can be graphed.
+
+```{r}
+tumor_type <- hnsc_coldata %>% select(barcode, definition)
+
+vars <- c("definition","barcode")
+
+upregulated_counts <- upregulated_counts %>% 
+      left_join(., Gene_Symbols1, by = "ensgene") %>%
+      dplyr::select(-ensgene) %>%
+      column_to_rownames(., var = "symbol") %>%
+      t() %>%
+      as.data.frame() %>%
+      rownames_to_column(., var = "barcode") %>%
+      left_join(., tumor_type, by = c("barcode")) %>%
+      pivot_longer(., cols = -all_of(vars), values_to = "TPM_Count", names_to = "Symbol")
+
+downregulated_counts <- downregulated_counts %>% 
+      left_join(., Gene_Symbols1, by = "ensgene") %>%
+      dplyr::select(-ensgene) %>%
+      column_to_rownames(., var = "symbol") %>%
+      t() %>%
+      as.data.frame() %>%
+      rownames_to_column(., var = "barcode") %>%
+      left_join(., tumor_type, by = c("barcode")) %>%
+      pivot_longer(., cols = -all_of(vars), values_to = "TPM_Count", names_to = "Symbol")
+
+Katase2026_downregulated_counts <- Katase2026_downregulated_counts %>%
+      left_join(., Gene_Symbols1, by = "ensgene") %>%
+      dplyr::select(-ensgene) %>%
+      column_to_rownames(., var = "symbol") %>%
+      t() %>%
+      as.data.frame() %>%
+      rownames_to_column(., var = "barcode") %>%
+      left_join(., tumor_type, by = c("barcode")) %>%
+      pivot_longer(., cols = -all_of(vars), values_to = "TPM_Count", names_to = "Symbol")
+
+
+```
+
+#Top 10 Upregulated Genes
+
+In this chunk of code, the figures for the comparison of expression levels of the top 10 upregulated and top 10 downregulated genes between the Solid Tissue Normal and the Primary solid Tissue. The TPM values that were downloaded from the TCGA website was filtered and converted into a dataframe where graphing can be performed. In Katase et al 2026, they indicated that they used TPM values although they did not disclose how they obtained these values, or whether they were calculated or downloaded from the TCGA database. The assumption being made is that the TPM_unstranded data from the TCGA are the counts that were used.
+
+A student's t test was performed to compare the gene expression between the tumor vs normal tissue using the rstatix t_test() function. Compared to the published results, the p-value were very close, but not exactly the same values although they were very close and the statistical significance was effectively the same. An example for CA9 is the p-value for the difference between the primary tumor and normal tissue is 1.41E-40 in Katase et al 2026 compared to 1.14E-44 that I reported. 
+
+```{r}
+library(rstatix)
+library(ggpubr)
+
+p_val <- upregulated_counts %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      filter(Symbol == "CA9") %>%
+      #group_by(Symbol, definition) %>%
+      #summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      t_test(., TPM_Count ~ definition, var.equal = FALSE) %>%
+      add_xy_position() %>%
+      mutate(y.position = 150, 
+             xmin = 1, 
+             xmax = 1,
+             statistic = as.numeric(round(statistic, digits = 2)))
+
+upregulated_counts %>%
+      filter(Symbol == "CA9") %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      group_by(Symbol, definition) %>%
+      summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      ggplot(aes(x=definition, y = mean, fill = definition))+
+      geom_col(width = 0.35,  color = "black")+ 
+      geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.0)+
+      theme_classic()+
+      ylim(0,180)+
+      scale_fill_manual(values = c("Solid Tissue Normal" = "darkgreen", "Primary solid Tumor" = "red"))+
+      scale_x_discrete(labels = c("Solid Tissue Normal" = paste0("Normal \n (N=", p_val$n1,")"),
+                                  "Primary solid Tumor" = paste0("Tumor \n (N=", p_val$n2,")")))+
+      stat_pvalue_manual(p_val,
+                         label = "p = {p} \n t = {statistic}",
+                         size = 5)+
+      labs(title = "CA9", y = "TPM", x ="")+
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            legend.position = "none")
+```
+
+##Plot for  MMP11
+
+```{r}
+GENE <- "MMP11"
+
+
+p_val <- upregulated_counts %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      filter(Symbol == GENE) %>%
+      #group_by(Symbol, definition) %>%
+      #summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      t_test(., TPM_Count ~ definition, var.equal = FALSE) %>%
+      add_xy_position() %>%
+      mutate(y.position = 150, 
+             xmin = 1, 
+             xmax = 1,
+             statistic = as.numeric(round(statistic, digits = 2)))
+
+upregulated_counts %>%
+      filter(Symbol == GENE) %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      group_by(Symbol, definition) %>%
+      summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      ggplot(aes(x=definition, y = mean, fill = definition))+
+      geom_col(width = 0.35,  color = "black")+ 
+      geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.0)+
+      theme_classic()+
+      ylim(0,360)+
+      scale_fill_manual(values = c("Solid Tissue Normal" = "darkgreen", "Primary solid Tumor" = "red"))+
+      scale_x_discrete(labels = c("Solid Tissue Normal" = paste0("Normal \n (N=", p_val$n1,")"),
+                                  "Primary solid Tumor" = paste0("Tumor \n (N=", p_val$n2,")")))+
+      stat_pvalue_manual(p_val,
+                         label = "p = {p} \n t = {statistic}",
+                         size = 5)+
+      labs(title = GENE, y = "TPM", x ="")+
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            legend.position = "none")
+```
+
+##Plot for  IL11
+
+```{r}
+GENE <- "IL11"
+
+
+p_val <- upregulated_counts %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      filter(Symbol == GENE) %>%
+      #group_by(Symbol, definition) %>%
+      #summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      t_test(., TPM_Count ~ definition, var.equal = FALSE) %>%
+      add_xy_position() %>%
+      mutate(y.position = 20, #set the y position of the p value#
+             xmin = 1,        #Indicate that the p value will be over the first geom_col    
+             xmax = 1,
+             statistic = as.numeric(round(statistic, digits = 2)))
+
+upregulated_counts %>%
+      filter(Symbol == GENE) %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      group_by(Symbol, definition) %>%
+      summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      ggplot(aes(x=definition, y = mean, fill = definition))+
+      geom_col(width = 0.35,  color = "black")+ 
+      geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.0)+
+      theme_classic()+
+      ylim(0,30)+
+      scale_fill_manual(values = c("Solid Tissue Normal" = "darkgreen", "Primary solid Tumor" = "red"))+
+      scale_x_discrete(labels = c("Solid Tissue Normal" = paste0("Normal \n (N=", p_val$n1,")"),
+                                  "Primary solid Tumor" = paste0("Tumor \n (N=", p_val$n2,")")))+
+      stat_pvalue_manual(p_val,
+                         label = "p = {p} \n t = {statistic}",
+                         size = 5)+
+      labs(title = GENE, y = "TPM", x ="")+
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            legend.position = "none")
+```
+
+##Plot for COLGALT1
+
+```{r}
+GENE <- "COLGALT1"
+
+
+p_val <- upregulated_counts %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      filter(Symbol == GENE) %>%
+      #group_by(Symbol, definition) %>%
+      #summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      t_test(., TPM_Count ~ definition, var.equal = FALSE) %>%
+      add_xy_position() %>%
+      mutate(y.position = 190, #set the y position of the p value#
+             xmin = 1,        #Indicate that the p value will be over the first geom_col    
+             xmax = 1,
+             statistic = as.numeric(round(statistic, digits = 2)))
+
+upregulated_counts %>%
+      filter(Symbol == GENE) %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      group_by(Symbol, definition) %>%
+      summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      ggplot(aes(x=definition, y = mean, fill = definition))+
+      geom_col(width = 0.35,  color = "black")+ 
+      geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.0)+
+      theme_classic()+
+      ylim(0,210)+
+      scale_fill_manual(values = c("Solid Tissue Normal" = "darkgreen", "Primary solid Tumor" = "red"))+
+      scale_x_discrete(labels = c("Solid Tissue Normal" = paste0("Normal \n (N=", p_val$n1,")"),
+                                  "Primary solid Tumor" = paste0("Tumor \n (N=", p_val$n2,")")))+
+      stat_pvalue_manual(p_val,
+                         label = "p = {p} \n t = {statistic}",
+                         size = 5)+
+      labs(title = GENE, y = "TPM", x ="")+
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            legend.position = "none")
+```
+
+##Plot for COL10A1
+
+```{r}
+GENE <- "COL10A1"
+
+
+p_val <- upregulated_counts %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      filter(Symbol == GENE) %>%
+      #group_by(Symbol, definition) %>%
+      #summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      t_test(., TPM_Count ~ definition, var.equal = FALSE) %>%
+      add_xy_position() %>%
+      mutate(y.position = 80, #set the y position of the p value#
+             xmin = 1,        #Indicate that the p value will be over the first geom_col    
+             xmax = 1,
+             statistic = as.numeric(round(statistic, digits = 2)))
+
+upregulated_counts %>%
+      filter(Symbol == GENE) %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      group_by(Symbol, definition) %>%
+      summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      ggplot(aes(x=definition, y = mean, fill = definition))+
+      geom_col(width = 0.35,  color = "black")+ 
+      geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.0)+
+      theme_classic()+
+      ylim(0, 100)+
+      scale_fill_manual(values = c("Solid Tissue Normal" = "darkgreen", "Primary solid Tumor" = "red"))+
+      scale_x_discrete(labels = c("Solid Tissue Normal" = paste0("Normal \n (N=", p_val$n1,")"),
+                                  "Primary solid Tumor" = paste0("Tumor \n (N=", p_val$n2,")")))+
+      stat_pvalue_manual(p_val,
+                         label = "p = {p} \n t = {statistic}",
+                         size = 5)+
+      labs(title = GENE, y = "TPM", x ="")+
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            legend.position = "none")
+```
+
+
+
+#Function to produce the TPM Counts Graphs
+
+The above code chunks creates a plot for the first 5 of 10 of the Top 10 upregulated genes between the tumor and normal tissue. However, Katase et al 2026 showed a single plot with all 10 of the top 10 upregulated genes in the same plot. A function was written to automatically combine graphs using the matrix generated previously in this document. As mentioned previously, the mean values are the same, but the t test results are slightly different with respect to p-values, although in both cases when there is significance, the p value is < 0.0001. An example for the CA9 gene is the p-value for the difference between the primary tumor and normal tissue is 1.41E-40 in Katase et al 2026 compared to 1.14E-44 that I reported. This is potentially due to a slightly different version of R, use of other R packages for statistical tests among other factors. 
+
+```{r}
+library(patchwork)
+
+Patchwork_Graphs <- function(data = data_matrix, order = NA, newcol = 5, newrow = 2){
+      
+      Symbols <- unique(data$Symbol)
+      
+      if (is.na(order[1]) == FALSE){
+            
+       Symbols <- order
+       
+      }
+      
+      
+     FINAL_PLOT <-  vector("list", 10)
+      
+      for (i in 1:length(Symbols)){
+      
+      Symbol_now <- Symbols[i]
+      
+      
+summarized_data <- data %>%
+      filter(Symbol == Symbol_now) %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      group_by(Symbol, definition) %>%
+      summarize(mean = mean(TPM_Count), sd = sd(TPM_Count),
+       .groups = "drop_last")
+
+larger <- as.vector(summarized_data[1,3] > summarized_data[2,3])
+      
+p_val <- data %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      filter(Symbol == Symbol_now) %>%
+      #group_by(Symbol, definition) %>%
+      #summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      t_test(., TPM_Count ~ definition, var.equal = FALSE) %>%
+      add_xy_position() %>%
+      mutate(xmin = if_else(larger == TRUE, 2, 1),        #Indicate that the p value will be over the first geom_col    
+             xmax = if_else(larger == TRUE, 2, 1),
+             statistic = as.numeric(round(statistic, digits = 2)))
+
+FINAL_PLOT[[i]] <- summarized_data %>%
+      ggplot(aes(x=definition, y = mean, fill = definition))+
+      geom_col(width = 0.35,  color = "black")+ 
+      geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.0)+
+      theme_classic()+
+      #ylim(0, 100)+
+      scale_fill_manual(values = c("Solid Tissue Normal" = "darkgreen", "Primary solid Tumor" = "red"))+
+      scale_x_discrete(labels = c("Solid Tissue Normal" = paste0("Normal \n (N=", p_val$n1,")"),
+                                  "Primary solid Tumor" = paste0("Tumor \n (N=", p_val$n2,")")))+
+      stat_pvalue_manual(p_val,
+                         label = "p = {p} \n t = {statistic}",
+                         size = 4.5,
+                         y.position = 0.80 * (max(summarized_data$mean) + max(summarized_data$sd)))+
+      labs(title = Symbol_now, y = "TPM", x ="")+
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            legend.position = "none")
+
+#FINAL_PLOT <- FINAL_PLOT + plot
+
+      }
+ 
+     FINAL_PLOT <- wrap_plots(FINAL_PLOT, ncol = newcol)
+      
+      print(FINAL_PLOT)    
+}
+
+```
+
+
+##Top 10 Upregulated Genes
+
+Figure 5a has been reproduced from Katase et al 2026 using a Students t test. The bars and errorbars represent mean +/- sd. The top 10 upregulated genes that were arranged by pvalue is consistent with the genes reported in Katase et al 2026.
+
+```{r}
+
+png(filename = file.path(Figure_Export, "Top_10_upregulated_Genes_by_pval_Fig5a.png"),
+    width = 1024, height = 768, units = "px")
+
+order <- c("CA9","MMP11","IL11","COLGALT1","COL10A1", "C5orf34-AS1", "FOXD2-AS1", "HOXC6", "CCN4","CDCA5") 
+
+EXPORT_GRAPH <-Patchwork_Graphs(data = upregulated_counts, order = order)
+
+dev.off()
+```
+
+
+##Top 10 Downregulated Genes
+
+Figure 5b has been reproduced from Katase et al 2026 using a Students t test. The bars and errorbars represent mean +/- sd. The top 10 upregulated genes that were arranged by pvalue is not all consistent with the genes reported in Katase et al 2026. This is likely due to the fact that Katase et al 2026 reported N=504 and N=44 for tumor samples and normal tissue respectively, compared to N=520 and N=44 for tumor and normal tissue as reported here. Alternatively, the use of R 4.5.2 rather than R 4.3.2 and a slightly different version of the DESeq() package may contribute partially
+
+```{r}
+
+png(filename = file.path(Figure_Export, "Top_10_downregulated_genes_by_pval_Fig5b.png"),
+    width = 1024, height = 768, units = "px")
+
+order <- c("LINC01829","NUCB2","AGFG2","IL12A-AS1","CAB39L", "CCL28","NOSTRIN","GPD1L","EMP1","SLC8A1-AS1") 
+
+EXPORT_GRAPH <-Patchwork_Graphs(data = downregulated_counts, order = NA)
+
+dev.off()
+```
+
+
+#@ Top 10 Downregulated Genes by list according to Katase et al 2026
+
+```{r}
+order <- c("LINC01829","NUCB2","AGFG2","IL12A-AS1","CAB39L", "CCL28","NOSTRIN","GPD1L","EMP1","SLC8A1-AS1") 
+
+Katase2026_downregulated_counts %>%
+      Patchwork_Graphs(data=., order = order)
+```
+
+
+
+
+
+
+
+
+
+###Run the TPM calculation
+
+```{r}
+Gene_symbols1 <- grch38 %>% dplyr::select(ensgene, symbol, start, end, description) %>%
+  mutate(length = end - start,
+         kb_length = length / 1000)
+
+Gene_symbols2 <- Gene_symbols1 %>% dplyr::select(ensgene,length,kb_length)
+
+#Extract the Top 10 regulated and Top 10 downregulated genes and their lengths
+upregulated_lengths <- Gene_symbols2 %>% filter( ensgene %in% upregulated$ensgene)
+downregulated_lengths <- Gene_symbols2 %>% filter(ensgene %in% downregulated$ensgene)
+
+#Source the TPM Calculation file
+source(file.path(here(),"Helper_Functions/TPM_Manual_Normalization.R"))
+
+#Obtain the raw_counts of the top 10 upregulated and downregulated genes
+upregulated_matrix <- hnsc_matrix[rownames(hnsc_matrix) %in% upregulated_lengths$ensgene,]
+upregulated_matrix <- upregulated_matrix %>% t()
+
+downregulated_matrix <- hnsc_matrix[rownames(hnsc_matrix) %in% downregulated_lengths$ensgene,]
+downregulated_matrix <- downregulated_matrix %>% t()
+
+TPM_upregulated <- tpm_function(matrix = upregulated_matrix, genelengths = upregulated_lengths)
+
+TPM_downregulated <- tpm_function(matrix = downregulated_matrix, genelengths = downregulated_lengths)
+
+
+#Calculated tpm
+
+```
+
+
+###Convert back into a usable form to make graph of the TPM counts
+
+```{r}
+TPM_upregulated <- TPM_upregulated %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ensgene") %>%
+  left_join(., Gene_symbols1, by = "ensgene") %>%
+  dplyr::select(-ensgene, -start, -end, -description, -kb_length, -length) 
+
+Sample_types <- hnsc_coldata %>% dplyr::select(barcode, sample_type)
+
+TPM_upregulated %>%
+  pivot_longer(., cols = -(symbol), names_to = "Sample_ID", values_to = "TPM_Count") %>%
+  filter(symbol == "CA9") %>%
+  left_join(., Sample_types, by = c("Sample_ID" = "barcode")) %>%
+  group_by(sample_type) %>%
+  summarize(mean = mean(TPM_Count),
+            sd = sd(TPM_Count)) %>%
+  ggplot(aes(x=))
+  
+TPM_unstranded_TCGA <- readRDS(file.path(here(), "/TCGA_Database/Katase et al 2026/Data", "tpm_unstranded_raw.rds"))
+
+TPM_unstranded_TCGA %>%
+ as.data.frame() %>%
+ rownames_to_column(., var = "ensgene") %>%
+ mutate(ensgene = str_remove(ensgene,"\\..*")) %>% #Used to remove the ends that differentiates the transcripts 
+  group_by(ensgene) %>%
+  summarize(across(everything(), sum)) %>%
+  column_to_rownames(., var = "ensgene") %>%
+  
+
+
+
+```
+
+
+

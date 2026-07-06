@@ -1,0 +1,34 @@
+
+cat("\n===== DEBUG: Checking slice_rows =====\n")
+cat("Symbol_now: \n")
+print(Symbol_now)
+cat("Number of matches:", sum(slice_rows), "\n")
+cat("Unique values in gene_identifier column:\n")
+print(unique(data[[gene_identifier]]))
+cat("=======================================\n\n")
+
+
+# --- DIAGNOSTIC BLOCK ---
+cat("\n\n===== DEBUG: Checking time column =====\n")
+cat("Column name:", outcome_timeline, "\n")
+cat("Class:", class(survival_curve[[outcome_timeline]]), "\n")
+
+cat("Head:\n")
+print(head(survival_curve[[outcome_timeline]]))
+
+# Show unique raw values (before numeric conversion)
+cat("\nUnique raw values:\n")
+print(unique(survival_curve[[outcome_timeline]]))
+
+# Convert to numeric with warnings suppressed
+tmp_numeric <- suppressWarnings(as.numeric(as.character(survival_curve[[outcome_timeline]])))
+
+# Count NA introduced by coercion
+cat("\nNAs introduced by numeric conversion:", sum(is.na(tmp_numeric)), "\n")
+
+# Show which values failed conversion
+bad_vals <- survival_curve[[outcome_timeline]][is.na(tmp_numeric)]
+cat("\nValues that failed numeric conversion:\n")
+print(unique(bad_vals))
+cat("========================================\n\n")
+# --- END DIAGNOSTIC BLOCK ---

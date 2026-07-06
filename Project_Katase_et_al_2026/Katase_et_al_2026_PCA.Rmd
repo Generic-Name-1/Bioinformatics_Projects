@@ -1,0 +1,174 @@
+---
+title: "Katase_et_al_2026_PCA"
+output: html_document
+---
+
+
+#Step 1): Activate the proper libraries
+
+```{r}
+library(tidyverse)
+library(TCGAbiolinks)
+library(survminer)
+library(survival)
+library(SummarizedExperiment)
+library(DESeq2)
+library(annotables)
+library(here)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+
+```
+
+#Step 2): Import the TCGA biolinks data (and we aren't going to be doing any data analysis where we only pick maybe 20 samples of each!)
+
+In this case, I will be downloading transcriptome profiling data from the TCGA database because I want to be measure the transcriptome to compare expression of different genes in TCGA-HNSC dataset to compare.
+```{r}
+file1 <- file.path(Data_Import, "vst_transformed_data.rds")
+
+vst_counts <- readRDS(file1)
+
+Gene_Symbols1 <- grch38 %>% select(ensgene, symbol) %>% distinct()
+
+#Gene Names
+Gene_Symbols <- grch38 %>% dplyr::select(ensgene, symbol)
+```
+
+
+#Step 3: Import the clinical metadata
+```{r}
+clinical_data <- GDCquery_clinic("TCGA-HNSC",
+                                 type = "clinical", save.csv = FALSE)
+```
+
+#Step 4: Download Data from the new query so that I can extract the counts if needed
+```{r cache= TRUE}
+GDCdownload(TCGA_HNSC)
+```
+
+#Step 5: Extract the counts from the dataset
+```{r}
+hnsc_data <- GDCprepare(TCGA_HNSC, summarizedExperiment = TRUE) #Extract the data using GDCprepare
+hnsc_matrix <- assay(hnsc_data, "tpm_unstrand") #I can use the assay() function to get the tpm results?
+```
+
+
+#Step 6: Get the raw_data and metadata and column data
+
+```{r}
+#Get Metadata and ColData
+
+hnsc_coldata <- readRDS(file = file.path(Data_Import,"hnsc_coldata.rds"))
+
+hnsc_metadata <- readRDS(file = file.path(Data_Import,"hnsc_metadata.rds"))
+```
+
+
+#Lets do some PCA analysis using the vst data (which I know is not as good and I should use the normalized counts, but I haven't figured that out yet)
+
+In this example, the biggest problem I am having is the fact that multiple ENS gnee IDs map to the same gene (or multiple different transcripts map to the same gene) and consequently there is a duplicate of the symbols which is causing issues when I try to run the analysis because there are "duplicates" of certain genes. What I am going to do to account for that is just
+
+
+https://www.researchgate.net/post/How-to-deal-with-multiple-ensemble-IDs-mapping-to-one-gene-symbol-in-a-RNA-Seq-dataset
+
+```{r}
+library(MASS)
+library(factoextra)
+
+#Orient the raw_count data into the proper form so that it can be transposed later. In this example, the biggest problem I am having is that
+hnsc_pca <- vst_counts %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ensgene") %>% #It appears mutate(ensgene = str_remove(ensgene,"\\..*")) %>% #This is the regular expression to remove everything after the . in ensgene, I will admit I don't fully understand it yet and had to use AI to help on this.
+  group_by(ensgene) %>%
+  summarize(across(where(is.numeric), sum)) %>%
+  ungroup() %>%
+  left_join(.,Gene_Symbols1, by = "ensgene") %>%
+  distinct() # I am not sure why, but it duplicates a lot of rows with the same values, therefore I can just remove the non-unique rows. Some of the code I used to figure that out is below, but not in a code chunk. I suspect if I was doing actual analysis for a paper, I might have to look more closely. However, when it functions, there seems to be clear duplication for each column which is likely affecting analysis.
+
+  
+# meta_data simplified which will be needed for the matrix
+pca_meta <- hnsc_coldata %>%
+  remove_rownames() %>%
+  dplyr::select(barcode, sample_type, tumor_descriptor, ajcc_pathologic_stage, primary_diagnosis, prior_malignancy, classification_of_tumor)
+
+#Make the transposed matrix to input into the PCA
+hnsc_pca_transposed <- hnsc_pca %>%
+  dplyr::select(-symbol) %>%
+  t() 
+
+
+hnsc_pca_transposed <- hnsc_pca_transposed %>% 
+as.data.frame() %>%
+mutate(across(everything(), as.numeric)) %>%
+rownames_to_column(., var = "barcode") %>%
+left_join(., pca_meta, by = "barcode") 
+
+#Remove the excess row
+hnsc_pca_transposed <- hnsc_pca_transposed[-c(1),]
+
+
+  #Converting the transposed_dataset into the data frame / matrix that will be input into the PRCOMP function to make the PCA table
+input_matrix <- hnsc_pca_transposed %>%
+  dplyr::select(-c(barcode, sample_type, tumor_descriptor, ajcc_pathologic_stage, primary_diagnosis,prior_malignancy,classification_of_tumor))
+
+
+colnames(input_matrix) <- hnsc_pca$ensgene 
+
+PCA_result <- prcomp(input_matrix, 
+                     scale = FALSE) #Preferred but I can't do it in this case
+
+fviz_pca_biplot(PCA_result,
+               label = "none",
+                habillage = hnsc_pca_transposed$sample_type,
+                geom.var = c(""))
+  
+```
+
+## Linear Discriminant Analysis
+
+https://www.youtube.com/watch?v=azXCzI57Yfc
+
+
+```{r}
+PCA_Matrix <- as.data.frame(PCA_result$x)
+
+#Ensure that the matrix variable (which differentiates the different grouops) is accurate to what we are trying to separate
+PCA_Matrix$sample_type <- as.factor(hnsc_pca_transposed$sample_type)
+
+#Run the LDA model
+
+LDA_Model <- lda(sample_type ~ PC1 + PC2 + PC3, data = PCA_Matrix)
+
+
+#Make a prediction which I can then use to graph the data
+lda_predict <- predict(LDA_Model)
+
+#Make a dataframe with the predictions using the predict function. Based on what copilot said, there is only one LD factor because it is equal to the number of different observations - 1. So if I have tumor and normal tissue, that is 2 unique factors - 1 which is equal to 1. This is different to the analysis before which had 4 different factors.
+lda_df <- data.frame(
+  LD1 = lda_predict$x[,1],
+  LD2 = lda_predict$x[,2],
+  Sample_Type = PCA_Matrix$sample_type
+)
+
+#Make a graph (Since I only have 1 discriminant factor in this example, it looks like the normal LDA graph isn't very good)
+lda_df %>%
+  ggplot(aes(x=LD1, fill = Sample_Type))+
+  geom_density(alpha = 0.2 )+
+  theme_classic()
+
+```
+
+
+```{r}
+
+dds <- readRDS(file = file.path(Data_Import, "dds_object.rds"))
+
+vst_dds <- vt(dds, blind = TRUE)
+
+PCA_plot <- plotPCA(vst_dds, ntop = 60000, intgroup = "sample_type")
+
+```
+

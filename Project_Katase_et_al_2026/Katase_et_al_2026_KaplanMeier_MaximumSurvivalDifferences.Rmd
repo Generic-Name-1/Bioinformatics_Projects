@@ -1,0 +1,290 @@
+---
+title: "Katase_et_al_2026_KaplanMeier_MaximumSurvivalDifferences"
+output: html_document
+---
+
+###Activate and Import Relevant libraries
+
+Activate the relevant libraries to perform this Kaplan Meier and Log Rank Test Analysis along with importing the Gene_Symbols, and designating a pathway for data import as well as Figure export.
+
+```{r}
+
+
+library(tidyverse)
+library(ggpubr)
+library(survival)
+library(survminer)
+#library(TCGAbiolinks)
+#library(SummarizedExperiment)
+library(annotables)
+library(here)
+#library(patchwork)
+
+
+#Pull Gene Names from BioMRT
+
+Gene_Symbols1 <- grch38 %>% dplyr::select(ensgene, symbol)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+###Import Data
+
+The next step is to import the combined Clinical Data with the Final Counts that have been previously manipulated for ease of use without having to re-run all the previous analysises. Furthermore, the Different Gene Expression results should be imported into R.
+
+```{r}
+Clinical_Data_and_Counts <- readRDS(file = file.path(Data_Import, "Clinical_Data_and_Final_Count.rds"))
+
+#Import the results from the Differential Gene Expression and convert it into the format to filter for only differentially expressed genes
+results <- readRDS(file = file.path(Data_Import, "DEG_results_Primary_vs_Normal.rds"))
+
+#Convert the ensgene ID to symbols and then filter for genes that have a padj value less than 0.05 or don't exist or are blank
+results <- results %>% 
+      rownames_to_column(., var = "ensgene") %>%
+      left_join(., Gene_Symbols1, by = "ensgene") %>%
+      dplyr::select(symbol, log2FoldChange, padj) %>%
+      filter(padj < 0.05 & abs(log2FoldChange) > 1) %>% drop_na() %>%
+      filter(symbol != "")
+
+#Filter out genes that do not have a statistically significant difference in gene expression.
+Clinical_Data_and_Counts <- Clinical_Data_and_Counts %>%
+      filter(symbol %in% results$symbol)
+```
+
+
+This is the code  used to try to build a basis for the function that will be written. The goal is to make a function that for each gene in the Clinical_Data_and_Counts dataframe, it will run a Kaplan Meier Survival Curve as well as run a Log Rank Test and extract the median survival times for each of the important groups as well as the p-value for the Log Rank test and add it to a data frame.
+
+```{r}
+data <- Clinical_Data_and_Counts %>%
+      filter(symbol == "TSPAN6")
+
+fit <- survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = data)
+
+summary(fit)$table
+
+median <- surv_median(fit, combine = TRUE)
+
+pval <- survdiff(Surv(time_in_months, deceased) ~ Expression_Level, data = data)$pval
+
+Pvaluegraph <- data.frame(matrix(ncol = 4, nrow = 0))
+
+#I sometimes use the rename() in dplyr, but for certain things like this I find Base R easier
+colnames(Pvaluegraph) <- c("symbol", as.character(paste("Median:",median[1,1])), as.character(paste("Median:",median[2,1])), "p_value")
+
+Pvaluegraph[1,1] <- "TSPAN"
+Pvaluegraph[1,2] <- median[1,2]
+Pvaluegraph[1,3] <- median[2,2]
+Pvaluegraph[1,4] <- pval
+
+```
+
+
+After confirming that the above code works, two different functions (where the v2 version has been optimized by pre-loading the size of the dataframe) to reduce the functions' operating time which appears to be several minutes. This function, named fullsurvival_v2, runs a survdiff analysis for each gene and extracts the median survival for the high expression (defined as greater than the median expression level) or low expression (defined as less than the median expression level). Furthermore, along with the survival times for each gene is extracted along with the p value.
+
+```{r}
+fullsurvival <- function(fulldata = data){
+      
+      #Create an Empty Dataframe
+      Pvaluegraph <- data.frame(matrix(ncol = 4, nrow = 0))
+      
+      ##Choose the names of the columns for the analysis
+      names <-  fulldata %>% 
+            survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = .) %>%
+            surv_median(fit = .)
+ 
+
+     #Run a loop to calculate the median survival for each group + p value
+      
+     Symbols <- unique(fulldata$symbol) 
+     
+     for(i in 1:length(Symbols)){
+           
+      Gene <- Symbols[i]
+          
+      filtered_data <- fulldata %>% filter(symbol == Gene)
+      
+      fit <- survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = filtered_data)
+
+median <- surv_median(fit, combine = TRUE)
+
+pval <- survdiff(Surv(time_in_months, deceased) ~ Expression_Level, data = filtered_data)$pval
+
+new_data <- c(Gene, median[1,2], median[1,3], pval)
+
+Pvaluegraph <- rbind(Pvaluegraph, new_data)
+
+     }
+ 
+   
+    #Return the combined dataframe after renaming the column
+     
+    colnames(Pvaluegraph) <- c("symbol", as.character(paste("Median:",names[1,1])), as.character(paste("Median:",names[2,1])), "p_value")
+    
+     return(Pvaluegraph)     
+}
+
+fullsurvival_v2 <- function(fulldata = data){
+      
+      ##Choose the names of the columns for the analysis
+      names <-  fulldata %>% 
+            survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = .) %>%
+            surv_median(fit = .)
+      
+      #Run a loop to calculate the median survival for each group + p value
+      
+     Symbols <- unique(fulldata$symbol) 
+     
+      #Create an Empty Dataframe and preallocate the length
+      Pvaluegraph <- data.frame(matrix(ncol = 4, nrow = length(Symbols)))
+     # Pvaluegraph <- matrix(ncol = 4, nrow = length(Symbols))
+
+     #Run a loop to calculate the median survival for each group + p value
+      
+     Symbols <- unique(fulldata$symbol) 
+     
+     for(i in 1:length(Symbols)){
+           
+      Gene <- Symbols[i]
+          
+      filtered_data <- fulldata %>% filter(symbol == Gene)
+      
+      fit <- survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = filtered_data)
+
+      median <- surv_median(fit, combine = TRUE)
+
+      pval <- survdiff(Surv(time_in_months, deceased) ~ Expression_Level, data = filtered_data)$pval
+ 
+new_data <- c(Gene, median[1,2], median[1,3], pval)
+
+Pvaluegraph[i,] <- new_data
+
+     }
+ 
+   
+    #Return the combined dataframe after renaming the column
+     
+    colnames(Pvaluegraph) <- c("symbol", as.character(paste("Median:",names[1,1])), as.character(paste("Median:",names[2,1])), "p_value")
+    
+     return(Pvaluegraph)     
+}
+
+fullsurvival_v3 <- function(fulldata = data){
+      
+     ##Choose the names of the columns for the analysis
+      names <-  fulldata %>% 
+            survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = .) %>%
+            surv_median(fit = .)
+      
+      #Run a loop to calculate the median survival for each group + p value
+      
+     Symbols <- unique(fulldata$symbol) 
+     
+      #Create an Empty Dataframe and preallocate the length
+      Pvaluegraph <- data.frame(matrix(ncol = 4, nrow = length(Symbols)))
+     # Pvaluegraph <- matrix(ncol = 4, nrow = length(Symbols))
+
+     #Run a loop to calculate the median survival for each group + p value
+      
+     Symbols <- unique(fulldata$symbol) 
+     
+     for(i in 1:length(Symbols)){
+           
+      Gene <- Symbols[i]
+          
+      filtered_data <- fulldata %>% filter(symbol == Gene)
+      
+      fit <- survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = filtered_data)
+      
+      table_info <- summary(fit)$table
+
+      pval <- survdiff(Surv(time_in_months, deceased) ~ Expression_Level, data = filtered_data)$pval
+ 
+new_data <- c(Gene, table_info[1,6], table_info[2,6], pval)
+
+Pvaluegraph[i,] <- new_data
+
+     }
+   
+    #Return the combined dataframe after renaming the column
+     
+    colnames(Pvaluegraph) <- c("symbol", as.character(paste("Median:",names[1,1])), as.character(paste("Median:",names[2,1])), "p_value")
+    
+     return(Pvaluegraph)     
+}
+
+
+```
+
+
+After the fullsurvival_v2 function was created, the Clinical_Data_and_Counts dataframe was input into the function and the results were saved to LargestSurvivalDiffGenes object. Since this data frame was already filtered out for genes that did not have a statistically significant difference in differential gene expression, but we want to filter for genes that have a statistically significant difference in survival times + sort by the largest difference in survival times which is going to have the largest clinical relevance for future studies.
+
+```{r}
+LargestSurvivalDiffGenes <- Clinical_Data_and_Counts %>% fullsurvival_v2(fulldata = .)
+
+colnames(LargestSurvivalDiffGenes)[2] <- "Median_High_Expression"
+colnames(LargestSurvivalDiffGenes)[3] <- "Median_Low_Expression"
+
+#Genes are filtered for when they have a statistically significant difference in Survival Times and then sorted by when they have the largest difference in survival.
+
+Significant_Logranktest_Genes <- LargestSurvivalDiffGenes %>%
+      mutate(across(c(Median_High_Expression, Median_Low_Expression, p_value), as.numeric)) %>% #Convert variables to numeric variables
+      mutate(Survival_Difference = (Median_High_Expression - Median_Low_Expression)) %>% # Calculate Survival Difference in months
+      mutate(p_adj = p.adjust(p_value, method = "BH")) %>% #Run the Bonferroni Hocheberg adjustment to account for multiple comparisons from Log Rank t test
+      filter(p_adj < 0.05) %>%
+      arrange(desc(Survival_Difference)) %>%
+      mutate(Median_High_Expression = round(Median_High_Expression, digits = 2), #Rounding the digits in all of these variables
+             Median_Low_Expression = round(Median_Low_Expression, digits = 2),
+             p_value = round(p_value, digits = 5),
+             Survival_Difference = round(Survival_Difference, digits = 1))
+
+Significant_Logranktest_Genes <- Significant_Logranktest_Genes %>%
+      rename(.,"Gene" = symbol, "High Expression \n Survival Length in Months" = Median_High_Expression,
+             "Low Expression \n Survival Length in Months" = Median_Low_Expression,
+             "p-value" = p_value, 
+             "Survival Difference in Months" = Survival_Difference,
+             "p-adj" = p_adj)
+
+#Use the gt package to make a nice table with bolded columns
+library(gt)
+
+export_table <- Significant_Logranktest_Genes %>%
+      head(10) %>%
+      gt() %>%
+      tab_style(style = cell_text(weight = "bold"), 
+                locations = cells_column_labels()) #Bolds the Column text
+
+
+export_table_padj <- Significant_Logranktest_Genes %>%
+      filter(`p-adj` < 0.05) %>%
+      head(10) %>%
+      gt() %>%
+      tab_style(style = cell_text(weight = "bold"), 
+                locations = cells_column_labels()) #Bolds the Column text
+
+#Export the tables as a png
+
+
+gtsave(export_table, filename = file.path(Figure_Export,"Top_10_genes_by_Survival_Difference_in_Months_Table.png"))
+      
+gtsave(export_table_padj, filename = file.path(Figure_Export,"Top_10_genes_by_Survival_Difference_in_Months_padj_Table.png"))
+
+```
+
+system.time({ ClinicalData_and_Counts %>% fullsurvival_v2(fulldata=.) }) #Working a matrix alone
+
+ user  system elapsed 
+185.850  55.999 261.494
+
+
+system.time({ ClinicalData_and_Counts %>% fullsurvival_v2(fulldata=.) }) #Working with a dataframe
+
+user  system elapsed 
+184.849  54.586 256.784 
+
+system.time({ ClinicalData_and_Counts %>% fullsurvival_v3(fulldata=.) }) #Working with a dataframe
+
+ user  system elapsed 
+186.268  62.156 281.381 

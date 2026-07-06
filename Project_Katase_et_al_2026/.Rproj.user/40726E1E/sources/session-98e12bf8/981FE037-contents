@@ -1,0 +1,17 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.results.rds
+.df.rds
+
+/GDCData
+
+/Data
+
+/Project_Katase_et_al_2026/GDCData
+/Project_Katase_et_al_2026/Data
+
+mv /Users/danielcanales/Downloads/R for One Drive Backup/Bioinformatics Work/Bioinformatics R Project/Bioinformatics_R_Practice/TCGA_Database/Katase et al 2026/* Project_Katase_et_al_2026
+
+mv /Users/danielcanales/Downloads/R for One Drive Backup/Bioinformatics Work/Bioinformatics R Project/Bioinformatics_R_Practice/TCGA_Database/Katase et al 2026/* Project_Katase_et_al_2026

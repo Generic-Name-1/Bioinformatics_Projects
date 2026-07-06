@@ -1,0 +1,231 @@
+---
+title: "Katase_et_al_2026_Expression_Levels_by_Log2FoldChange"
+output: html_document
+---
+
+For the figures 5a and 5b in Katase et al 2026, they determined the top 10 upregulated and top 10 downregulated genes were determined by filtering by the log2FoldChange as either greater than 1 or less than -1, and then arranged by padj value where the smallest p-value, or most statistically significant difference, is the metric for the top 10 upregulated and downregulated genes. Alternatively, what could be done is that instead of arranging the results by padj, the result could be arranged by the Log2Fold Change. For this file, the result from the DESeq() analysis will be filtered to remove any differential gene expresion where p > 0.05, and then it is arranged by greatest log2FoldChange. 
+
+#Import Raw Data and Activate relevant libraries
+
+```{r}
+library(here)
+library(tidyverse)
+library(annotables)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(DESeq2)
+library(rstatix)
+library(ggpubr)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+
+#Import the TPM Counts
+file1 <- file.path(Data_Import, "tpm_unstranded_raw.rds")
+
+tpm_counts_hnsc <- readRDS(file1)
+
+Gene_Symbols1 <- grch38 %>% select(ensgene, symbol) %>% distinct()
+
+#Get Metadata, Coldata and Clinical Data
+
+clinical_data <- GDCquery_clinic("TCGA-HNSC", type = "clinical", save.csv = FALSE)
+
+hnsc_coldata <- readRDS(file = file.path(Data_Import,"hnsc_coldata.rds"))
+
+hnsc_metadata <- readRDS(file = file.path(Data_Import,"hnsc_metadata.rds"))
+
+```
+
+#Take the top 10 upregulated and downregulated genes (from the DEG_Fig1) file and use them to filter
+
+I am importing the Differential Expression Analysis results that was performed in DEG_Fig1 and extracting the top 10 upregulated and top 10 downregulated genes. After importing the Differential Expression Analysis, I was able to filter for the top 10 upregulated and top 10 downregulated genes. As mentioned previously, the Top 10 upregulated and downregulated graphs
+
+```{r}
+results <- readRDS(file.path(Data_Import, "DEG_results_Primary_vs_Normal.rds"))
+
+results <- results %>% 
+  rownames_to_column(., var = "ensgene") %>%
+  left_join(., Gene_Symbols1, by = "ensgene") %>% distinct() #The distinct is in case there were accidentally two duplicates of the same gene for some reason
+
+
+```
+
+#Extract the TPM counts from the full TPM counts
+
+In this code, we converted the ensgene by removing the extra transcript values that will make it difficult to correlate the results. In the results object from the Differential Expression Analysis does not have the extra transcript numbers. Therefore, I will need to remove the extra transcript values, since I am looking at gene level expression and not specific transcripts of a gene, there should be no difference in the results.
+
+```{r}
+#Convert the matrix into a dataframe and remove the extra values (correspondent to the transcript ID) since I am focusing on gene level, not transcript level
+tpm_counts_hnsc <- tpm_counts_hnsc %>%
+      as.data.frame() %>%
+      rownames_to_column(., var = "ensgene") %>% 
+      mutate(ensgene = str_remove(ensgene,"\\..*"))
+
+```
+
+
+#Convert the matrixes into dataframes that can be used to make pretty graphs
+
+Now, the gene symbols needs to be added to the matrices so that the gene expression for the top 10 upregulated and downregulated genes can be compared. Furthermore, the dataframes and matrices were manipulated were put into a format that can be graphed.
+
+```{r}
+tumor_type <- hnsc_coldata %>% select(barcode, definition)
+
+vars <- c("definition","barcode")
+```
+
+#Function to create those graphs
+
+```{r}
+library(patchwork)
+
+Patchwork_Graphs <- function(data = data_matrix, order = NA, newcol = 5, newrow = 2){
+      
+      Symbols <- unique(data$Symbol)
+      
+      if (is.na(order[1]) == FALSE){
+            
+       Symbols <- order
+       
+      }
+      
+      
+     FINAL_PLOT <-  vector("list", 10)
+      
+      for (i in 1:length(Symbols)){
+      
+      Symbol_now <- Symbols[i]
+      
+      
+summarized_data <- data %>%
+      filter(Symbol == Symbol_now) %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      group_by(Symbol, definition) %>%
+      summarize(mean = mean(TPM_Count), sd = sd(TPM_Count),
+       .groups = "drop_last")
+
+larger <- as.vector(summarized_data[1,3] > summarized_data[2,3])
+      
+p_val <- data %>%
+      mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor"))) %>%
+      filter(Symbol == Symbol_now) %>%
+      #group_by(Symbol, definition) %>%
+      #summarize(mean = mean(TPM_Count), sd = sd(TPM_Count)) %>%
+      t_test(., TPM_Count ~ definition, var.equal = FALSE) %>%
+      add_xy_position() %>%
+      mutate(xmin = if_else(larger == TRUE, 2, 1),        #Indicate that the p value will be over the first geom_col    
+             xmax = if_else(larger == TRUE, 2, 1),
+             statistic = as.numeric(round(statistic, digits = 2)))
+
+FINAL_PLOT[[i]] <- summarized_data %>%
+      ggplot(aes(x=definition, y = mean, fill = definition))+
+      geom_col(width = 0.35,  color = "black")+ 
+      geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.0)+
+      theme_classic()+
+      #ylim(0, 100)+
+      scale_fill_manual(values = c("Solid Tissue Normal" = "darkgreen", "Primary solid Tumor" = "red"))+
+      scale_x_discrete(labels = c("Solid Tissue Normal" = paste0("Normal \n (N=", p_val$n1,")"),
+                                  "Primary solid Tumor" = paste0("Tumor \n (N=", p_val$n2,")")))+
+      stat_pvalue_manual(p_val,
+                         label = "p = {p} \n t = {statistic}",
+                         size = 4.5,
+                         y.position = 0.80 * (max(summarized_data$mean) + max(summarized_data$sd)))+
+      labs(title = Symbol_now, y = "TPM", x ="")+
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            legend.position = "none")
+
+#FINAL_PLOT <- FINAL_PLOT + plot
+
+      }
+ 
+     FINAL_PLOT <- wrap_plots(FINAL_PLOT, ncol = newcol)
+      
+      print(FINAL_PLOT)    
+}
+
+```
+
+
+#Reorient the Top 10 Upregulated and Downregulated parameters
+
+Per the original parameters performed in Katase et al 2026, the top 10 upregulated and downregulated genes  for Fig 5a and 5b were arranged by the lowest padj value. Therefore, as long as the Log2FoldChange was greater than either 1 or -1 respectively, the order was based on how significant the result was. Alternatively, one could rank the top 10 upregulated and downregulated genes not by the lowest p-value, but by the magnitude of the Log2Fold Change. As long as the padj values are still < 0.05, the changes in differential expression is statistically significant. 
+
+```{r}
+##Find the ENS Gene IDs for the Top 10 upregulated and downregulated genes by new criteria
+
+#There appears to be a duplicate in these results, I suspect because there are probably two transcripts in the original hnsc_matrix of the same gene? Or there is another way #that a duplication happened, so i used ## #distinct because each row was equal to each other.
+Most_upregulated <- results %>% filter(padj < 0.05) %>% arrange(desc(log2FoldChange)) %>% head(10) %>% distinct()
+Most_downregulated <- results %>% filter(padj < 0.05) %>% arrange(log2FoldChange) %>% head(10) %>% distinct()
+
+Most_upregulated <- Most_upregulated$ensgene
+Most_downregulated <- Most_downregulated$ensgene
+
+##Extract the relevant counts
+most_upregulated_counts <- tpm_counts_hnsc[tpm_counts_hnsc$ensgene %in% Most_upregulated, ]
+
+most_downregulated_counts <- tpm_counts_hnsc[tpm_counts_hnsc$ensgene %in% Most_downregulated, ]
+
+##Perform the same data manipulation as above to 
+
+##Indicates tumor type (whether its Primary Tumor or Normal Tissue)
+tumor_type <- hnsc_coldata %>% select(barcode, definition)
+
+##Variables I don't want to be pivoted longer
+vars <- c("definition","barcode")
+
+most_upregulated_counts <- most_upregulated_counts %>% 
+      left_join(., Gene_Symbols1, by = "ensgene") %>%
+      dplyr::select(-ensgene) %>% # group_by(symbol) %>% summarize(across(everything(), mean)) %>% 
+      column_to_rownames(., var = "symbol") %>%
+      t() %>%
+      as.data.frame() %>%
+      rownames_to_column(., var = "barcode") %>%
+      left_join(., tumor_type, by = c("barcode")) %>%
+      pivot_longer(., cols = -all_of(vars), values_to = "TPM_Count", names_to = "Symbol")
+
+most_downregulated_counts <- most_downregulated_counts %>% 
+      left_join(., Gene_Symbols1, by = "ensgene") %>%
+      dplyr::select(-ensgene) %>%
+      column_to_rownames(., var = "symbol") %>%
+      t() %>%
+      as.data.frame() %>%
+      rownames_to_column(., var = "barcode") %>%
+      left_join(., tumor_type, by = c("barcode")) %>%
+      pivot_longer(., cols = -all_of(vars), values_to = "TPM_Count", names_to = "Symbol")
+```
+
+
+##Top 10 Upregulated Genes
+
+The bars and errorbars represent mean +/- sd where the statistics are determined by a Student's t test.
+
+```{r}
+png(filename = file.path(Figure_Export, "Top_10_upregulated_Genes_by_LogFold2Change.png"),
+    width = 1024, height = 768, units = "px")
+
+most_upregulated_counts %>%
+      Patchwork_Graphs(data=.,)
+
+dev.off()
+```
+
+
+##Top 10 Downregulated Genes
+
+The bars and errorbars represent mean +/- sd where the statistics are determined by a Student's t test.
+
+```{r}
+png(filename = file.path(Figure_Export, "Top_10_downregulated_Genes_by_LogFold2Change.png"),
+    width = 1024, height = 768, units = "px")
+
+most_downregulated_counts %>%
+      Patchwork_Graphs(data=.,)
+
+dev.off()
+```
+
+
