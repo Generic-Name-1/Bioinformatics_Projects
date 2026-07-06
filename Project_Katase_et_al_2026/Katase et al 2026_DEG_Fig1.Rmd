@@ -5,12 +5,13 @@ output: html_document
 ---
 
 
-# Katase et al 2026 Figure 1a Replication
+# Katase et al 2026 Figure 1a Reproduction
 
 The goal for this is to replicate Figure 1a from Katase et al 2026. In this paper, they use DESeq() among other packages to analyze the Head and Neck Cancer cohort from the TCGA-HNSC (The Cancer Genome Atlas) consortium. This file will try to reproduce Figure 1 of the Differential Expression that was produced in [Katase et al 2026](https://www.cureus.com/articles/423507-differentially-expressed-genes-in-head-and-neck-squamous-cell-carcinoma-exploratory-research-using-the-cancer-genome-atlas-tcga-rna-sequence-data-and-deseq2-package#!/). Furthermore, the analysis that is done here will used to perform later analysis and reproduce other figures in Katase et al 2026. 
 
 
 ###Step 1): Activate the proper libraries
+
 ```{r}
 library(tidyverse)
 library(TCGAbiolinks)
@@ -68,7 +69,7 @@ clinical_data %>% drop_na(age_at_diagnosis, tumor_grade, ajcc_clinical_n, ajcc_c
 
 ###Step 4: Download Data from the new query so that I can extract the counts
 
-Download the data from the object for the TCGA-HNSC dataset so then it can be extracted in the next step.
+Download the data from the object for the TCGA-HNSC dataset so then it can be extracted in the next step. This will create a folder called GDCdata.
 
 ```{r cache= TRUE}
 
