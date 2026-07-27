@@ -1,0 +1,154 @@
+---
+title: "PCA_quality_control_microarray"
+output: html_document
+---
+
+#Step 1: Import relevant libraries and file pathways
+
+Here, the relevant libraries are loaded and the file paths for importing data and exporting figures is done.
+```{r}
+library(tidyverse)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(edgeR)
+library(annotables)
+library(here)
+library(factoextra)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+```
+
+#Import the Normalized Microarray Data and the Metadata for the GEO 
+
+The metadata and Normalized Microarray data that was downloaded previously
+```{r}
+Norm_microarray <- readRDS(file.path(Data_Import, "Normalized_Microarray.rds"))
+  
+Norm_metadata <- readRDS(file.path(Data_Import, "Microarray_Metadata.rds"))
+
+#Select the specific columns in the metadata that I need (The ID for each sample and whether it a tumor or non-tumor tissue)
+Norm_metadata <- Norm_metadata %>% dplyr::select(Tumor_Type  = `Tissue:ch1`, geo_accession, platform_id)
+```
+
+#Prepare the microarray for PCA analysis
+```{r}
+#Ensure (based on looking at the micro array) that sample IDs are in the rows
+Norm_microarray <- Norm_microarray %>%
+  t()
+
+PCA_annotation <- Norm_microarray %>% 
+  as.data.frame() %>%
+  rownames_to_column(., var = "geo_accession") %>% #geo_accession contains the sample IDs
+  left_join(., Norm_metadata, by = "geo_accession")
+
+#Check if the order of the metadata is the same as the order as rownames of the microarray data
+identical(rownames(Norm_microarray), Norm_metadata$geo_accession)
+
+length(rownames(Norm_microarray))
+length(Norm_metadata$geo_accession)
+
+#Since this is not the case, match them and then check if they are in same order
+order <- match(rownames(Norm_microarray), Norm_metadata$geo_accession )
+
+Norm_metadata <- Norm_metadata[order , ]
+
+identical(rownames(Norm_microarray), Norm_metadata$geo_accession)
+```
+
+#Run the PCA
+
+```{r}
+#I am not going to "Scale" because the data is already normalized from when we downloaded it
+PCA <- prcomp(Norm_microarray)
+```
+
+#Look at PCA Biplots faceted by either Tumor vs Non-Tumor tissue or by the Affymatrix Platform ID matrix
+
+```{r}
+#Separation by Tumor vs Non-Tumor Tissue
+PCA_tumor <- fviz_pca_biplot(PCA,
+                label = "none",
+                geom.var = c(""),
+                title = "PCA Biplot of GSE14520 GEO set separated by tissue type",
+                habillage = PCA_annotation$Tumor_Type)
+
+#Looking at the PCA that separates by the affymatrix platform type
+PCA_affymatrix <- fviz_pca_biplot(PCA,
+                label = "none",
+                geom.var = c(""),
+                title = "PCA Biplot of GSE14520 GEO set separated by affymatrix",
+                habillage = PCA_annotation$`platform_id`)
+
+#Based on these results, you can clearly see separation of the Tumor and non-tumor tissue. However, there appears to be some batch effects as well caused by the different platforms of the Affymatrix.
+png(filename = file.path(Figure_Export, "PCA_BIPLOT_MICROARRAY_TUMORTYPE.png"),
+    width = 1024, height = 768, units = "px")
+
+PCA_tumor
+
+dev.off()
+
+png(filename = file.path(Figure_Export, "PCA_BIPLOT_MICROARRAY_AFFYMATRIX.png"),
+    width = 1024, height = 768, units = "px")
+
+PCA_affymatrix
+
+dev.off()
+```
+
+#Using the Limma package to remove the batch effect
+
+```{r}
+
+library(limma)
+
+#Converting the Microarray back to its original format to remove batch effect
+Norm_microarray_batch <- Norm_microarray %>%
+  t()
+
+#Create a DGE list obect 
+DGE <- DGEList(counts = Norm_microarray_batch, samples = Norm_metadata)
+
+
+#If the data wasn't already normalized, we would do these steps
+# Calculate the Normalization factors like what was performed in the EdgeR RNA-SEQ analysis
+#DGE <- calcNormFactors(dge, method = "TMM")
+
+
+batch_corrected_DGE <- removeBatchEffect(DGE$counts, batch = DGE$samples$`platform_id`)
+
+#Look at the PCA after being batch corrected and save the relevant figures
+
+batch_corrected_DGE <- batch_corrected_DGE %>% t()
+
+PCA_batch_effect <- prcomp(batch_corrected_DGE)
+
+
+#Batch Corrected PCA Platform Type
+
+png(filename = file.path(Figure_Export, "PCA_BIPLOT_MICROARRAY_AFFYMATRIX_BATCHCORRECTED.png"),
+    width = 1024, height = 768, units = "px")
+
+fviz_pca_biplot(PCA_batch_effect,
+                label = "none",
+                geom.var = c(""),
+                title = "PCA Biplot of GSE14520 GEO set batch corrected separated by affymatrix",
+                habillage = PCA_annotation$`platform_id`)
+
+dev.off()
+
+#Batch Corrected PCA tumor
+
+png(filename = file.path(Figure_Export, "PCA_BIPLOT_MICROARRAY_TUMORTYPE_BATCHCORRECTED.png"),
+    width = 1024, height = 768, units = "px")
+
+fviz_pca_biplot(PCA_batch_effect,
+                label = "none",
+                geom.var = c(""),
+                title = "PCA Biplot of GSE14520 GEO set batch corrected separated by tissue type",
+                habillage = PCA_annotation$Tumor_Type)
+
+dev.off()
+```
+
