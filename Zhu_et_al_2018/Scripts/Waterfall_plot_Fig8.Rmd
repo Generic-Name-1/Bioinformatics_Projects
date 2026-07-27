@@ -1,0 +1,85 @@
+---
+title: "Waterfall_plot_Fig8"
+output: html_document
+---
+
+#Activate Libraries and file pathway
+
+```{r}
+
+library(tidyverse)
+library(TCGAbiolinks)
+library(edgeR)
+library(here)
+library(ggpubr)
+library(rstatix)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+#Import CPM Matrix data from the TCGA Dataset and relevant coldata
+
+```{r}
+
+CPM_Matrix <- readRDS(file.path(Data_Import, "CPM_counts.rds"))
+  
+LIHC_coldata <- readRDS(file.path(Data_Import, "LIHC_coldata.rds"))
+
+LIHC_coldata <- LIHC_coldata %>% dplyr::select(definition, barcode, patient)
+
+```
+
+#Filter for the paired samples from the TCGA Data
+
+```{r}
+#The paired data was extracted by grouping by patient and then filtering when there is the same patient with more than one index which means that there is a tumor and non-tumor sample associated with that patient
+
+LIHC_coldata_paired <- LIHC_coldata %>%
+ group_by(patient) %>%
+  filter(n() > 1)
+
+
+#Remove the columns from the CPM Matrix, which is associated with a unique sample, that does not have a associated pair from the same patient (Tumor and non-tumor)
+
+filter <- colnames(CPM_Matrix) %in% LIHC_coldata_paired$barcode 
+
+CPM_Matrix <- as.data.frame(CPM_Matrix)
+CPM_Matrix_subset <- CPM_Matrix[ , filter]
+
+
+```
+
+
+#Data Manipulation + Graphing to create a waterfall plot
+
+
+```{r}
+CPM_Matrix_subset %>%
+  rownames_to_column(., var = "Symbol") %>%
+  filter(Symbol == "CDK1") %>% #Filter for Gene of Interest
+  pivot_longer(data=., cols = -c("Symbol"), names_to = "barcode", values_to = "Count") %>% #Pivot to longer layout for graphing
+  left_join(., LIHC_coldata_paired, by = "barcode") %>%
+  dplyr::select( patient,definition, Count) %>%
+  pivot_wider(data=., values_from = "Count", names_from = "definition") %>%
+  mutate(LOG2NT = log2(`Primary solid Tumor` / `Solid Tissue Normal`),
+         Greater_Expression = if_else(LOG2NT > 0, "T", "NT")) %>% #Indicate whether the Tumor or non-tumor has greater expression 
+  arrange(desc(LOG2NT)) %>%
+  mutate(Sample_number = row_number()) %>%
+  ggplot(aes(x=reorder(Sample_number, -LOG2NT), y = LOG2NT, fill = Greater_Expression))+
+  geom_col()+
+  labs(x = "Sample Number", y = "Log2(T / NT) ", title = "Waterfall Plot from TCGA-LIHC Dataset for Paired Samples for CDK1")+
+  theme_classic()+
+  theme(legend.title = element_blank(),
+        plot.title = element_text(hjust = 0.5))+
+  scale_x_discrete(breaks = seq(from = 0, to = 50, by = 10))
+
+
+ggsave(filename = "CDK1_Waterfall_Plot_Fig8.png",
+       path = Figure_Export,
+       units = "px")
+```
+

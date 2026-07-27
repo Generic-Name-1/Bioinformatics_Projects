@@ -1,0 +1,180 @@
+---
+title: "Pearson_Correlation_Analysis_Fig8"
+output: html_document
+---
+
+#Import relevant libraries
+
+```{r}
+library(tidyverse)
+library(here)
+library(pheatmap)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+```
+
+
+#Import the TCGA Counts
+
+Import the CPM (Counts per Million) from the TCGA-LIHC Dataset that were previously generated.
+
+```{r}
+TCGA_CPM_Counts <- readRDS(file.path(Data_Import, "CPM_counts.rds"))
+```
+
+
+
+#Genes correlated with CDK1 or CDC2
+
+The genes that were found to be connected by PPI analysis in Zhu et al 2018 were isolated and then a new dataframe was created with the CPM_Counts and Log2(CPM + 1) respectively. Since no PPI analysis was done itself, as of yet, so the genes that they isolated to be the most important per the PPI analysis were isolated, along with the names of CDK1 (also known as CDC2) were saved. Then, the CPM_Counts from the TCGA dataset was filtered for only the Important Genes. Finally, the CPM_counts were converted into Log2(CPM + 1) for later analysis as well.
+```{r}
+#Filtering for the specific genes of interest
+
+Important_Genes <- c("CDK1","CDC2", "TOP2A","CCNB1", "CDC20", "PLK1", "BIRC5", "CCNB2", "FOS", "AURKA", "AURKB")
+
+TCGA_CPM_Counts <- TCGA_CPM_Counts[rownames(TCGA_CPM_Counts) %in% Correlated_Genes, ]
+
+TCGA_CPM_Counts <- TCGA_CPM_Counts %>% t() %>% as.data.frame(.)
+
+
+## Calculate the Log2(CPM + 1) 
+
+#Base R conversion
+TCGA_Log2_CPM_Count <- as.data.frame(apply(TCGA_CPM_Counts, 2, FUN = function(x){log2(x + 1)}))
+
+
+#Setting it up via dplyr
+TCGA_Log2_CPM_Count <- TCGA_CPM_Counts %>%
+  mutate(across(where(is.numeric), ~ log2(.x + 1))) #.x will take the value
+
+```
+
+
+#Correlation Matrix with the CPM Counts
+
+From the TCGA_CPM_Counts, a correlation matrix was made and then a heatmap with clustering was made using pheatmap. Finally, a ggplot2 heatmap was created to look at the relationship between these genes in an easy to understand graph.
+
+```{r}
+#Correlation Matrix
+cor_mat(data = TCGA_CPM_Counts)
+
+#Pheatmap Heat Map with clustering
+
+pheatmap(TCGA_CPM_Counts)
+
+#Basic Correlation Heatmap
+TCGA_CPM_Counts %>%
+  cor_mat() %>%
+  pivot_longer(data=., cols = -c("rowname"), names_to = "Correlated_Gene", values_to = "Correlation") %>%
+  ggplot(aes(x = rowname, y = Correlated_Gene, fill = Correlation ))+
+  geom_tile()+
+  scale_fill_gradient2(low = "darkred", high = "darkgreen", mid = "white", limits = c(-1,1))
+```
+
+#Correlation Matrix with the Log2(CPM_Counts + 1)
+
+The same steps done in the previous chunk were performed except with the data that was converted into the log2(CPM + 1) data which is the data that is used for the direct expression graphs for figures 7. To be clear, Zhu et al 2018 is not clear what units these graphs are in, so an assumption was made. The units in this chunk are Log2(CPM_Counts + 1).
+```{r}
+#Correlation Matrix
+cor_mat(data = TCGA_Log2_CPM_Count)
+
+#Pheatmap Heat Map with clustering
+
+pheatmap(TCGA_Log2_CPM_Count)
+
+#Basic Correlation Heatmap
+TCGA_Log2_CPM_Count %>%
+  cor_mat() %>%
+  pivot_longer(data=., cols = -c("rowname"), names_to = "Correlated_Gene", values_to = "Correlation") %>%
+  ggplot(aes(x = rowname, y = Correlated_Gene, fill = Correlation ))+
+  geom_tile()+
+  scale_fill_gradient(low = "red", high = "green")
+```
+
+
+
+#Pearson's Correlation for CDK1 and TOP2A
+
+In Zhu et al 2018, they created Pearson's Correlation maps demonstrating the relationship of expression of CDK1 with 9 other genes. The first gene was TOP2A and this code will reproduce the figure showing a strong positive relationship between CDK1 and TOP2A expression. Although the cosmetics of the graphs are not exactly the same, the data is very close and that is what is important. The graph will demonstrate the R correlation coefficient and the pvalue for the correlation test.
+
+```{r}
+
+#Pearson's R Correlation value
+corr_value <- with(data = TCGA_Log2_CPM_Count, cor(x = CDK1, y = TOP2A, method = "pearson"))
+corr_value <- round(corr_value, digits = 2)
+
+#Pearson Correlation Test with more statistics (Converts the R squared into R value)
+corr_value <- with(data = TCGA_Log2_CPM_Count, cor.test(x = CDK1, y = TOP2A, method = "pearson"))
+corr_value <- round(corr_value[["estimate"]], digits = 2)
+
+
+#Linear Model of CDK1 influence on TOP2A to get the R correlation value
+model <- summary(lm(data = TCGA_Log2_CPM_Count, TOP2A ~ CDK1))
+model_tidy <- tidy(model)
+
+corr_value <- round(sqrt(abs(model$r.squared)), digits = 2)
+
+TCGA_Log2_CPM_Count %>%
+  ggplot(aes(x = CDK1, y = TOP2A)) +
+  geom_point(color = "blue")+
+  geom_smooth(method = lm, color = "red")+
+  theme_classic()+
+  labs(x = "CDK1 Expression",
+       y = "TOP2A Expression")+
+  annotate("text", x = 7, y = 2.5, label = paste0("R=",corr_value), size = 6)
+```
+
+#Loop for all of them
+
+A loop was written to put the Pearson's Correlation Survival curve for each of the 9 genes of interest from the PPI analysis into a single plot.The 9 genes that are to be investigated is identified and then a for loop is used to create a pearson's correlation plot for each of the genes and then the graphs are combined into a single plot and saved.
+
+```{r}
+library(patchwork)
+
+#Genes of interest
+Corr_Genes <- c("TOP2A","CCNB1", "CDC20", "PLK1", "BIRC5", "CCNB2", "FOS", "AURKA", "AURKB")
+
+#Creating an empty list
+wrapped_plots <- vector("list", length = length(Corr_Genes))
+
+#For loop that make a pearson correlation plot for each gene
+for (i in 1:length(wrapped_plots)){
+  
+  Symbol <- Corr_Genes[i]
+
+  #Get the P value value from a linear regression
+  model <- summary(lm(data = TCGA_Log2_CPM_Count, TCGA_Log2_CPM_Count[, Symbol] ~ CDK1))
+  model_tidy <- tidy(model)
+  
+  rounded_pval <- model_tidy[["p.value"]][2]
+  rounded_pval <- if_else(rounded_pval < 0.01, "<0.01", ">0.01")
+  
+  #Get the R Correlation Coefficient
+  cor_value <- with(data = TCGA_Log2_CPM_Count, cor(x = CDK1, y = TCGA_Log2_CPM_Count[, Symbol], method = "pearson"))
+  cor_value <- round(cor_value, digit = 2)
+  
+  #Get plot
+ plot <- ggplot(data = TCGA_Log2_CPM_Count, aes(x = .data$CDK1, y = .data[[Symbol]])) +
+  geom_point(color = "blue")+
+  geom_smooth(method = lm, color = "red")+
+  theme_classic()+
+  labs(x = "CDK1 Expression",
+       y = paste(Symbol,"Expression"))+
+  labs(caption = paste("R=",cor_value, ";P", rounded_pval))
+ 
+ #Add plot to list
+ wrapped_plots[[i]] <- plot
+  
+}
+
+#Wrap the plots together
+wrapped_plots <- wrap_plots(wrapped_plots, nrow = 3)
+
+wrapped_plots
+
+ggsave(filename = "PearsonCorrelation_Genes_Fig9.png",
+       path = Figure_Export <- file.path(here(),"Figures"))
+```
+

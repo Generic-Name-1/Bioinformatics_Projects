@@ -1,0 +1,255 @@
+---
+title: "Fig1_RNA_SEQ_EdgeR"
+output: html_document
+---
+
+
+
+#Activate relevant libraries
+
+The first step to running the analysis and reproducing Fig1 from Zhu et al 2018 is to import the relevant R package libraries and then import the relevant matrix data, clinical data, and additional coldata needed for the analysis. The data that was previously downloaded through the use of the TCGAbiolinks package were imported into R.
+
+```{r}
+library(tidyverse)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(edgeR)
+library(annotables)
+library(here)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+
+# Import the Data
+
+
+The matrix, coldata, and metadata is imported into R and then the Gene Symbols are extracted from the metadata to use for gene annotation later on. Furthermore, the exclusion criteria that they applied in this paper, which exclude patients where they did not have a survival timeline of the patient, was performed.
+
+```{r}
+LIHC_matrix <- readRDS(file.path(Data_Import, "LIHC_data_raw.rds"))
+  
+LIHC_coldata <- as.data.frame(readRDS(file.path(Data_Import, "LIHC_coldata.rds")))
+  
+LIHC_metadata <- as.data.frame(readRDS(file.path(Data_Import, "LIHC_metadata.rds")))
+
+#Extract the Gene Symbols for later analysis
+Gene_Symbols <- LIHC_metadata %>% dplyr::select(gene_id, gene_name)
+
+
+#The Exclusion Criteria for the patients were to remove patients that had no survival time (1 patient) and 3 patients that had reoccurence of HCC
+
+LIHC_coldata <-  LIHC_coldata %>%
+  drop_na(days_to_last_follow_up)
+```
+
+#Identify duplication
+
+We figure out that there are some duplicates of the same gene by the measurement of different transcripts. In our example here, we identified 1,233 duplicates that we have to account for. In our example, we will be performing gene level, not transcript level, analysis. In our example, we will sum up all the different transcripts for the same gene into an single count value for the analysis. When looking at what the duplicated transcripts are, the majority of the transcripts have little or no expression, so the additional of the values together will not change the results very much. It is unclear if Zhu et al 2018 did the same type of cleaning and much of the work was done in GraphPad Prism.
+
+```{r}
+sum(duplicated(rownames(LIHC_matrix)))
+
+sum(duplicated(Gene_Symbols$gene_name))
+```
+
+```{r}
+LIHC_matrix <- LIHC_matrix %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ensgene") %>%
+  left_join(., Gene_Symbols, by = c("ensgene" = "gene_id"))
+
+#Group by Symbol and combine the transcript expression into gene level expression
+
+LIHC_matrix <- LIHC_matrix %>%
+  mutate(ensgene = as.character(ensgene),
+         ensgene = str_remove(ensgene,"\\..*")) %>% #Remove the transcript IDs and then we will combine the rows based on symbols
+  group_by(gene_name) %>%
+  summarize(across(where(is.numeric), sum)) #Since many of the different transcripts have very low expression, I am going to just sum up the transcripts together and pool them prior to the analysis
+
+
+
+
+```
+
+#Do relevant cleaning of the dataset before preparing the matrix for RNA-Seq analysis
+
+Further cleaning in the pipeline to make sure the order of the sample IDs in the matrix column names and rows of the Sample IDs in the LIHC_coldata in order to make sure they match and are in the same order which is needed for this differential expression analysis to work appropriately. Finally, a DGE list is created which is an object needed to run edgeR differential gene expression analysis.
+
+```{r}
+
+#Keep symbol order before checking to make sure the column names are the same order of samples as the barcode in coldata
+genenames <- LIHC_matrix$gene_name 
+
+
+#Filter the columns (sample IDs) in the LIHC matrix based on the patients excluded in the Coldata
+
+filter <-  colnames(LIHC_matrix) %in% LIHC_coldata$barcode
+
+LIHC_matrix <- LIHC_matrix[ ,filter] 
+
+#genenames <- genenames[filter]
+
+rownames(LIHC_matrix) <- as.vector(genenames)
+
+
+#Ensuring the grouping order is the same and reorder if they are not in the same order.
+
+identical(LIHC_coldata$barcode, colnames(LIHC_matrix))
+
+#Check the lengths of the columns
+length(LIHC_coldata$barcode)
+length(colnames(LIHC_matrix))
+
+#Since they are equal length but not the right order, I want to match them
+
+row_match <- match(LIHC_coldata$barcode, colnames(LIHC_matrix))
+                   
+LIHC_coldata <- LIHC_coldata[row_match, ]
+
+#Checking again to see if they are identical
+
+identical(LIHC_coldata$barcode, colnames(LIHC_matrix))
+
+#Create a grouping to show we want to compare tumors vs normal tissue
+Grouping <- LIHC_coldata %>% dplyr::select(barcode, definition)
+
+Grouping <- Grouping %>%
+  mutate(definition = factor(definition, levels = c("Solid Tissue Normal","Primary solid Tumor")))
+
+#Prepare the matrix
+
+prepared_matrix <- DGEList(counts = LIHC_matrix,
+                           samples = Grouping,
+                           remove.zeros = FALSE)
+
+                           
+```
+
+#Designing a matrix
+
+This is a simple design matrix where the Design variable is based on the "grouping" of definition which separates between Primary solid Tumor tissue and "Solid Normal Tissue as the determining factor. Then, there is more cleaning in R which involves filtering all rows (genes) with an average Row Mean less than 1 to be consistent with the results from Zhu et al 2018.
+
+```{r}
+Design <-  model.matrix(~prepared_matrix$samples$definition)
+#colnames(Design) <- c("Primary solid Tumor", "Solid Normal Tissue")
+
+
+#They exclude all genes where the average count of the data was not greater than 1 per gene. I could do this prior to making the matrix, but it looks like the best practice is to do it afterward. This is consistent with what Zhu et al 2018 performed per their directions.
+
+keep <- rowMeans(LIHC_matrix) > 1
+
+# Subset your DGEList object based on whether or not we are keeping each row
+
+prepared_matrix <- prepared_matrix[keep, , keep.lib.size = FALSE]
+
+# Proceed with normalization to adjust for changes in the row sizes
+prepared_matrix <- calcNormFactors(prepared_matrix)
+    
+
+```
+
+#Further Normalization
+
+The next step involves more downstream analysis to normalize for library sizes and then estimate the dispersion of variance of the data. After this further cleaning step, we can actually run the differential expression analysis.
+
+```{r}
+#Normalize the Library Sizes
+
+prepared_matrix_NormLibSizes <- normLibSizes(prepared_matrix)
+
+#Estimate Dispersion of the variance of the data
+
+prepared_matrix_estimateDisp <- estimateDisp(prepared_matrix_NormLibSizes, Design)
+
+#Set the reference level of which is being compared to what. For my example, I want to compare Normal tissue to tumor tissue
+
+prepared_matrix$samples$definition <- relevel(prepared_matrix$samples$definition, ref = "Solid Tissue Normal")
+```
+
+#Fit the Quasi-Likelihood F-test curve
+
+A general linear model using edgeR was ran using a pipeline from the edgeR bioconductor vignette in order to generate differential gene expression results where the results are comparing the Primary Tumor compared to Solid Tissue normal in HCC cancer patients. Consequently, a logFC of 2 means that there was a logFC change of 2 from the normal tissue to the tumor where the tumor has higher levels of expression.
+```{r}
+#Run the next two which performs different qualsi-likelihood tests thare 
+fit <- glmQLFit(prepared_matrix, Design)
+
+#Use a global F test as a method for identifying differentially expressed genes
+qlf <- glmQLFTest(fit, coef = 2) #coeff is showing that there are 2 different reference groups
+
+#Extract the most differentially expressed gene after using the Bonferroni-Hochberg Correction
+res <- topTags(qlf, n = Inf, adjust.method = "BH")
+
+#Extract the results into a dataframe for later graphing
+result_dataframe <- res$table
+
+
+#Save the results for later analysis in the future
+saveRDS(result_dataframe, file = file.path(Data_Import, "edgeR_DEG_Results.rds"))
+```
+
+After the results were generated and converted into a readable dataframe, genes were filtered to ensure they had a FDR < 0.05 and logCPM >= 1 to be aligned with the protocol in Zhu et al 2018. Then, each gene was designated to either be upregulated, downregulated, or "other" depending on the logFC greater than 2 or less than -2 respectively as consistent with Zhu et al 2018. Unfortunately, they did not provide any code, so reproduction was attempted by reading the methods section. Due to this, the graph of Differential Expression are not identical to Zhu et al 2018. For example, their Figure 1 is similar, although not exactly the same, as
+
+```{r}
+result_dataframe <- result_dataframe %>%
+  filter(FDR < 0.05 &  logCPM >= 1 ) %>% #Filter when FDR < 0.05, the absolute value of the LogFC is greater than or equal to 2 and LogCPM is greater than 1
+  mutate(FC = 10^logFC) %>% #Get the actual fold change of the gene
+  mutate(DEG = case_when(
+    logFC > 2 ~ "Upregulated",
+    logFC < -2 ~ "Downregulated",
+    TRUE ~ "Other"
+  ))
+
+graph <- result_dataframe %>%
+  ggplot(aes(x = logFC, y = -log10(FDR), color = DEG))+
+  geom_point()+
+  ylim(0,60)+
+  xlim(-11,11)+
+  coord_flip()+
+  scale_color_manual(values = c("Downregulated" = "darkgreen", "Other" = "black", "Upregulated" = "red"))+
+  theme_classic()+
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  labs(title = "Differential Expression of Normal Liver Tissue compared to \n HCC Primary Tumors")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+png(filename = file.path(Figure_Export, "DEG_Fig1.png"))
+
+graph
+
+dev.off()
+
+table(result_dataframe$DEG)
+```
+
+
+
+#Heatmap of the upregulated gene
+
+This is the attempt to reproduce the heatmap from Zhu et al 2018, although it is not successful. I am trying to figure out what exactly they are representing in the graph.
+```{r}
+#Saving a regular non-log CPM Count dataframe
+CPM <- LIHC_matrix %>%
+  rownames_to_column(., var = "gene_name") %>%
+  filter(gene_name %in% rownames(result_dataframe)) %>%
+  column_to_rownames(., var = "gene_name") %>%
+  cpm(.)
+
+saveRDS(CPM, file.path(Data_Import, "CPM_counts.rds"))
+
+#Saving a Log CPM Count dataframe
+LogCPM <- LIHC_matrix %>%
+  rownames_to_column(., var = "gene_name") %>%
+  filter(gene_name %in% rownames(result_dataframe)) %>%
+  column_to_rownames(., var = "gene_name") %>%
+  cpm(., log = TRUE)
+
+saveRDS(LogCPM, file.path(Data_Import, "Log_CPM_counts.rds"))
+
+library(pheatmap)
+
+pheatmap(CPM)
+```
+

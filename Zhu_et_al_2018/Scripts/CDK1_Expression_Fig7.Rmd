@@ -1,0 +1,237 @@
+---
+title: "CDK1_LogCPMExpression_Fig7"
+output: html_document
+---
+
+#Import the relevant R Package libraries as well as indicate the relevant file paths for Figure Export and Data Import
+
+```{r}
+
+library(tidyverse)
+library(TCGAbiolinks)
+library(edgeR)
+library(here)
+library(ggpubr)
+library(rstatix)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+
+#Import the Data needed
+
+The Counts per Million matrix for the TCGA-LIHC dataset that was converted from the raw counts is imported as well as the coldata.
+
+```{r}
+
+CPM_Matrix <- readRDS(file.path(Data_Import, "CPM_counts.rds"))
+  
+LIHC_coldata <- readRDS(file.path(Data_Import, "LIHC_coldata.rds"))
+
+LIHC_coldata <- LIHC_coldata %>% dplyr::select(definition, barcode, patient)
+
+```
+
+
+#Do relevant cleaning prior to CDK1 expression
+
+In Zhu et al 2018, they how the expression between tumor and non-tumor tissue in the TCGA-LIHC dataset, along with the TCGA-LIHC dataset where only the paired samples (a patient with a tumor and non-tumor sample), along with the GEO Omnibus GSE14520. This code chunk will isolate the pairs of samples coming from a patient and subset a matrix so that it only includes the samples that has an opposite sample from the same patient.
+
+```{r}
+#The paired data was extracted by grouping by patient and then filtering when there is the same patient with more than one index which means that there is a tumor and non-tumor sample associated with that patient
+
+LIHC_coldata_paired <- LIHC_coldata %>%
+ group_by(patient) %>%
+  filter(n() > 1)
+
+
+#Remove the columns from the CPM Matrix, which is associated with a unique sample, that does not have a associated pair from the same patient (Tumor and non-tumor)
+
+filter <- colnames(CPM_Matrix) %in% LIHC_coldata_paired$barcode 
+
+CPM_Matrix <- as.data.frame(CPM_Matrix)
+CPM_Matrix_subset <- CPM_Matrix[ , filter]
+
+
+```
+
+#Make Graph of the TCGA-LIHC Paired Subset (Fig 7a)
+
+Now, in Zhu et al 2018, they do not seem to indicate which units they use to compare the counts between the tissue types. Therefore, an assumption was made and the expression will be indicated by graphing the log2() of the CPM counts that were previously calculated. Due to this lack of clarity, this is another cause for when the data and results will not be exactly like the results reported in Zhu et al 2018. However, the general trends should be held. For the t test, although they are paired results, a paired t test was not performed because Zhu et al 2018 did not do so. The intent is to try to reproduce their work as closely as possible. Here, a Student's T test is performed between each of the samples.
+
+```{r}
+#Creating a subset that is merged with the coldata
+Final_Prepped_subset <- CPM_Matrix_subset %>%
+  rownames_to_column(., var = "Symbol") %>%
+  pivot_longer(., cols = -("Symbol"), values_to = "Count", names_to = "barcode") %>%
+  left_join(.,LIHC_coldata_paired, by = "barcode") %>%
+  mutate(definition = factor(definition, levels = c("Solid Tissue Normal", "Primary solid Tumor")))
+
+
+set.seed(71626)
+
+#Printing the Graph
+
+t_test_subset <- Final_Prepped_subset %>%
+  filter(Symbol == "CDK1") %>%
+  t_test(formula = Count ~ definition, data = .) %>%
+  add_xy_position() %>%
+  add_significance() %>%
+  mutate(y.position = log2(y.position))
+
+Final_Prepped_subset %>%
+  filter(Symbol == "CDK1") %>%
+  ggplot(aes(x= definition, y = log2(Count + 1)))+
+  geom_jitter(width = 0.1)+
+  theme_classic()+
+  labs(title = "Expression of CDK1 in Non-Tumor and Tumor in HCC Cancers \n in the TCGA Paired set",
+       x = "",
+       y = "Log (CPM + 1)")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))+
+  stat_pvalue_manual(data = t_test_subset,
+                     y.position = "y.position",
+                     label = "p.signif")
+
+#Save using ggsave
+ggsave(filename = "CDK1_Expression_Paired_Set_Fig7a.png",
+       path = Figure_Export,
+       units = "px")
+```
+
+#Make Graph of the TCGA-LIHC including all of the TCGA data (Fig 7b)
+
+This will produce a graph comparing the Log2(CPM + 1) counts between the expression for CDK1 between the two tissue types. In this example, the graph will include the entire set rather than only the paired set.
+
+```{r}
+Final_Prepped_data <- CPM_Matrix %>%
+  rownames_to_column(., var = "Symbol") %>%
+  pivot_longer(., cols = -("Symbol"), values_to = "Count", names_to = "barcode") %>%
+  left_join(.,LIHC_coldata, by = "barcode") %>%
+  mutate(definition = factor(definition, levels = c("Solid Tissue Normal", "Primary solid Tumor")))
+
+#Printing the Graph
+
+t_test_all <- Final_Prepped_data %>%
+  filter(Symbol == "CDK1") %>%
+  t_test(formula = Count ~ definition, data = .) %>%
+  add_xy_position() %>%
+  add_significance() %>%
+  mutate(y.position = log2(y.position))
+  
+Final_Prepped_data %>%
+  filter(Symbol == "CDK1") %>%
+  ggplot(aes(x= definition, y = log2(Count+1)))+
+  geom_jitter(width = 0.2)+
+  theme_classic()+
+  labs(title = "Expression of CDK1 in Non-Tumor and Tumor in HCC Cancers \n in the TCGA set",
+       x = "",
+       y = "Log (CPM + 1)")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))+
+  stat_pvalue_manual(data = t_test_all,
+                     y.position = "y.position",
+                     label = "p.signif")
+
+#Save using ggsave
+ggsave(filename = "CDK1_Expression_Full_TCGA_Set_Fig7b.png",
+       path = Figure_Export,
+       units = "px")
+
+
+```
+
+#Make Graph from the GEO Omnibus for CDK1
+
+Zhu et al 2018 uses the GEO Omnibus data from the GSE14520 as a 3rd dataset as an additional dataset to confirm the results found in the TCGA-LIHC (previously called TCGA-HCC). The first step will be importing the data that was previously identified and normalized. The second step is to do the relevant data cleaning steps in order compare the gene expression. Furthermore, these counts are the RMA normalized counts that were previously generated since Zhu et al 2018 does not indicate which units are used for the graphing
+
+```{r}
+#Import the data
+GEO_matrix <- readRDS(file.path(Data_Import,"Normalized_Microarray.rds"))
+
+GEO_metadata <- readRDS(file.path(Data_Import,"Microarray_Metadata.rds"))
+```
+
+
+It appears that CDK1 is also known as [CDC2](https://pmc.ncbi.nlm.nih.gov/articles/PMC9452984/). This is important because the same probe will correlate with a different gene, even if they are actually the same gene, if this is not accounted for. This was accounted for as the Probe ID data was imported, and then combined with the GEO_matrix and a graph was created showing the expression between NT (Non-Tumor) and T (Tumor) tissues for CDK1/CDC2 with a Student's T test. One step that was tricky was the fact that many probes correlated with the same gene and they weren't all from the same. Both Probe ID maps were added to the matrix and then the gene-names were combined and filtered for the specific gene (CDK1 or CDC2) was performed.
+
+```{r}
+#Import the Metadata
+
+library(GEOquery)
+GSE <- getGEO(
+  GEO = "GSE14520",
+  GSEMatrix = TRUE
+)
+
+#Extract the Probe IDs for each of the Probes (For the GPL3921 and GPL571 respectively)
+probe3921 <- GSE$`GSE14520-GPL3921_series_matrix.txt.gz`@featureData@data
+probe3921 <- probe3921 %>% dplyr::select(ID, GPL3921_GENESYMBOL = `Gene Symbol`)
+
+probes571 <- GSE$`GSE14520-GPL571_series_matrix.txt.gz`@featureData@data
+probes571 <- probes571 %>% dplyr::select(ID, GPL571_GENESYMBOL = `Gene Symbol`)
+
+#Map Probes to the GEO matrix 
+
+GEO_matrix <- GEO_matrix %>%
+  rownames_to_column(., var = "ID") %>%
+  left_join(., probe3921, by = "ID") %>% #GPL3921 probes
+  left_join(., probes571, by = "ID")      #GPL571 probes
+
+
+#Pivot the GEO_matrix into a dataframe that can be readable, group by geo_accession (Sample ID) and the gene symbol, and then add the metadata
+GEO_set <- GEO_matrix %>%
+  pivot_longer(data=., cols = -c("GPL571_GENESYMBOL", "GPL3921_GENESYMBOL", "ID"), names_to = "geo_accession", values_to = "Count")
+  
+#Combine the two probe IDs with the genes that match
+GEO_set <- GEO_set %>%
+  mutate(Symbol = paste(GPL3921_GENESYMBOL, "or", GPL571_GENESYMBOL)) %>% 
+  dplyr::select(-c("GPL3921_GENESYMBOL", "GPL571_GENESYMBOL", "ID")) %>%
+  filter(Symbol == "CDC2 or CDK1") %>% #Filter or the specific gene of interest ******GENE OF INTEREST********
+  group_by(geo_accession, Symbol) %>% 
+  summarize(Count = sum(Count)) %>% 
+  ungroup() #There are 3 different probes that correlate with CDK1/CDC2. The samples were grouped by Symbol and geo_accession (which correlates with a sample ID) and then the sum of the counts were added up so that the counts can be compared directly. This is the decision that was made because the 3 different probes potentially picked up 3 different isoforms of the gene. This step can be removed and re-analyzed can be performed if this is found to be the incorrect step to do such as the probes are potentially double counting and the sum is the incorrect way to deal with the multiple probes for the same gene.
+
+
+#Add the metadata + transform the Tumor Type into Tumor (T) or Non Tumor (NT)
+GEO_set <- GEO_set %>%
+  left_join(., GEO_metadata %>% dplyr::select(Tumor_Type = `Tissue:ch1`, geo_accession),
+            by = "geo_accession") %>%
+  mutate(Tumor_Type = case_when(
+    Tumor_Type == "Liver tissue of six healthy donors" ~ "NT",
+    Tumor_Type == "Liver Non-Tumor Tissue" ~ "NT",
+    Tumor_Type == "Liver tissue of six healthy liver donors" ~ "NT",
+    Tumor_Type == "Liver Tumor Tissue" ~ "T")) %>%
+    drop_na(Tumor_Type) %>%  mutate(Tumor_Type = factor(Tumor_Type, levels = c("NT","T"))) 
+
+
+#Run the Students T-test between the two tissue types
+t_test_GEO <- GEO_set %>%
+  t_test(formula = Count ~ Tumor_Type, data = .) %>%
+  add_xy_position() %>%
+  add_significance() %>%
+  mutate(y.position = log2(y.position))
+
+#Graph the GEO set
+GEO_set %>%
+  ggplot(aes(x= Tumor_Type, y = log2(Count+1)))+
+  geom_jitter(width = 0.2)+
+  theme_classic()+
+  labs(title = "Expression of CDK1 in Non-Tumor (NT) and Tumor (T) in HCC Cancer \n in the GEO GSE14520 set",
+       x = "",
+       y = "Log2(Count + 1)")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))+
+  stat_pvalue_manual(data = t_test_GEO,
+                     y.position = "y.position",
+                     label = "p.signif")+
+  ylim(0,6)
+
+#Save the plot
+ggsave(filename = "CDK1_Expression_GEO_GSE14520_Set_Fig7c.png",
+       path = Figure_Export,
+       units = "px")
+  
+```
+

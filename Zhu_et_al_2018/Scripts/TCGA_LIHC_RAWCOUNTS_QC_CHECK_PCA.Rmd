@@ -1,0 +1,122 @@
+---
+title: "PCA_Analysis"
+output: html_document
+---
+
+#Import Relevant Libraries
+
+This step will turn on the relevant libraries needed to perform the Principle Component Analysis (PCA) and Linear Discriminant Analysis (LDA) for the data collected for Zhu et al 2018. While they did not perform any PCA or LDA analysis that was hown in figure, it does not mean no PCA, LDA or other steps to ensure quality of the data was performed beforehand. This is a step to look out for other batch effects which may confound the downstream analyses.
+
+```{r}
+
+library(tidyverse)
+library(MASS)
+library(factoextra)
+library(here)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+```
+
+#Import Relevant Datasets
+
+For the PCA analysis, the decision was made to use the CPM counts which adjusts for the sequencing depth, but not the gene lengths. However, since we are comparing the gene lengths between two different group types, for example, the separation between normal tissue and primary tumors, the gene length should not matter as much so that we do not need to use TPM or RPKM. Those counts adjust for length of the gene and are more applicable for within-sample analysis. However, in the future, the CPM counts could be converted into RPKM or TPM or any other different count converted from the raw counts.
+
+```{r}
+CPM_matrix <- readRDS(file.path(Data_Import, "CPM_counts.rds"))
+  
+LIHC_coldata <- as.data.frame(readRDS(file.path(Data_Import, "LIHC_coldata.rds")))
+
+#To remove the patient with no survival time
+LIHC_coldata <-  LIHC_coldata %>%
+  drop_na(days_to_last_follow_up)
+  
+LIHC_metadata <- as.data.frame(readRDS(file.path(Data_Import, "LIHC_metadata.rds")))
+```
+
+#Transpose the matrix
+
+For PCA analysis, the analysis requires that the gene names (or ensgene IDs) be in the columns and the Sample IDs be in the rows. Therefore, the data that is imported needs to transposed and then joined with
+the coldata, or metadata describing the columns in the dataset, so that PCA can be faceted by the sample type.
+
+```{r}
+#Transpose the data so that the gene names are in the columns
+CPM_matrix <- CPM_matrix %>%
+  t() 
+
+#Add the column_data
+CPM_matrix_with_coldata <- CPM_matrix %>%  
+  as.data.frame() %>%
+  rownames_to_column(., var = "barcode") %>%
+  left_join(., LIHC_coldata, by = c("barcode")) %>%
+  mutate(definition = factor(definition, levels = c("Solid Tissue Normal", "Primary solid Tumor")))
+```
+
+#Run PCA matrix analysis
+
+```{r}
+#Run the PCA analysis using prcomp() in Base R
+PCA_matrix <- prcomp(CPM_matrix)
+
+
+#Make a nice PCA plot using this function from MASS, but other packages could be used if wanted
+PCAplot <- fviz_pca_biplot(PCA_matrix,
+               label = "none",
+               habillage = CPM_matrix_with_metadata$definition,
+                geom.var = c(""))
+
+png(filename = file.path(Figure_Export, "Normal_vs_Tissue_PCA.png"))
+
+PCAplot+
+  labs(title = "PCA - Biplot for TCGA-LIHC Dataset")
+
+dev.off()
+```
+
+
+
+## Linear Discriminant Analysis
+
+The PCA analysis did not give great separation between the Primary solid tumors and the Solid Tissue normal samples. Therefore, LDA analysis was performed to see if we can get greater differentiation between the 
+samples. Since we only have two groups, the tumor and normal tissue group, we will only have 1 dimension for the LDA analysis.
+
+```{r}
+
+
+#Convert the PCA Matrix into a dataframe by extracting the results from the Principle Component Analysis
+LDA_matrix <- as.data.frame(PCA_matrix$x)
+
+#Add the group type (either Solid Tissue Normal or Primary solid Tumor) to the matrix
+LDA_matrix$definition <-CPM_matrix_with_metadata$definition
+
+#Run the LDA model
+
+LDA_Model <- lda(definition ~ PC1 + PC2 + PC3, data = LDA_matrix)
+
+
+#Convert the LDA_model into predicted values
+
+lda_predict <- predict(LDA_Model)
+
+#Make a dataframe with the predictions using the predict function. Since there are only 2 factors to compare, we will only have a single Linear Discriminant Component since the 2 factors - 1 = 1 LDA component
+lda_df <- data.frame(
+  LD1 = lda_predict$x[,1],
+  Definition = LDA_matrix$definition
+)
+
+#Make and save the graph
+
+png(filename = file.path(Figure_Export, "Normal_vs_Tissue_LDA.png"))
+
+lda_df %>%
+  ggplot(aes(x=LD1, fill = Definition))+
+  geom_density(alpha = 0.2 )+
+  theme_classic()+
+  labs(title = "Linear Discriminant Analysis Plot separating Primary solid tumor \n and Solid Tissue Normal in the TCGA-LIHC Dataset")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.25))
+
+dev.off()
+
+```
+

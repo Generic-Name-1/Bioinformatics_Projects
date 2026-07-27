@@ -1,0 +1,271 @@
+---
+title: "Zhu et al 2018"
+output: html_document
+---
+
+# Generation of the Dataset to reproduce the analysis in Zhu et al 2018
+
+
+
+#Step 1): Activate the proper libraries
+
+```{r}
+
+library(tidyverse)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+#library(DESeq2)
+#library(annotables)
+library(here)
+library(edgeR)
+
+if (file.exists(file.path(here(),"Data")) == FALSE){ 
+  
+  file.create(file.path(here(),"Data"))
+  
+  }
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+
+```
+
+##Step 2): Import the TCGA data
+
+```{r}
+TCGA_LIHC <- GDCquery(
+  project = "TCGA-LIHC",
+  data.category = "Transcriptome Profiling",
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  data.type = "Gene Expression Quantification",
+  sample.type = c("Primary Tumor","Solid Tissue Normal"), #I want to include both tumor tissue and solid normal tissue for this analysis!
+  access = "open"
+)
+
+#We can use this output later in the analysis so that we can
+output <- getResults(TCGA_LIHC)
+
+```
+
+### Step 3: Import the clinical metadata
+
+```{r}
+clinical_LIHC <- GDCquery_clinic("TCGA-LIHC",
+                                 type = "clinical", save.csv = FALSE)
+```
+
+### Step 4: Download Data from the new query so that I can extract the counts
+```{r cache= TRUE}
+GDCdownload(TCGA_LIHC)
+
+
+```
+
+### Step 5: Extract the counts from the dataset
+```{r}
+LIHC_data <- GDCprepare(TCGA_LIHC, summarizedExperiment = TRUE) #Extract the data using GDCprepare
+LIHC_matrix <- assay(LIHC_data, "unstranded")
+
+#So I don't necessarily have to redownload it all the time if I want to do
+saveRDS(LIHC_matrix, file = file.path(Data_Import, "LIHC_data_raw.rds"))
+
+LIHC_metadata <- as.data.frame(rowData(LIHC_data))
+LIHC_coldata <- as.data.frame(colData(LIHC_data))
+
+saveRDS(LIHC_metadata, file = file.path(Data_Import, "LIHC_metadata.rds"))
+saveRDS(LIHC_coldata, file = file.path(Data_Import, "LIHC_coldata.rds"))
+
+```
+
+
+## Import the GEO Data from the GEO Database
+
+Now, the Microarray data from the NCBI GEO Database will be done.
+
+```{r}
+library(GEOquery)
+library(affy)
+library(affyio)
+library(R.utils)
+
+#Get Raw Data for the Microarray Data:
+
+#I was having problems automatically downloading, so I manually downloaded the raw tar file and put it into the Data folder. If you go to the NCBI GEO Website and look up GSE14520, you can download the raw tar file.
+
+#Create path for the CEL files to go
+
+tar <- file.path(Data_Import,"GSE14520_RAW.tar")
+CELpath <- file.path(Data_Import,"GSE14520_RAW_Data")
+
+#Create a directory if it does not exist
+if(file.exists(CELpath) == FALSE) {
+  
+  dir.create(CELpath)
+}
+
+
+#Untar the files to remove the .gz
+untar(tar, exdir = CELpath)
+
+#Raw Data Import
+
+files <- list.files(path = CELpath, full.names = TRUE)
+
+#It turns out that the file importing is complex because the different files have different Affy microarray systems that they were obtained on with different lengths so they can't be combined when imported. A biostars post was found where this guy wrote some code that helped allowed the importation of both of them separately. This was performed to import from both systems including the GPL571 and GPL3921 affymatrix systems.
+
+
+#Creates a list of all of the CEL files that I want to import and their full names
+f <- list.files(path = CELpath,pattern = "CEL.gz", full.names = TRUE)
+
+#This runs the apply function over the entire list of files. It uses read.celfile.header()$cdfname to extract the type of Affy platform that was used for each file. Then, a table is that counts up how many files were made with each platform.
+table(sapply(f, function(x) read.celfile.header(x)$cdfName))
+
+#The base version of nest() that applies the same function above that isolates the affymatrix platform type, but then splits the lists into two different dataframes based on the affymatrix type.
+split_list <- split(f, sapply(f, function(x) read.celfile.header(x)$cdfName))
+
+
+#Import the separate matrices separately
+GEO_microarray_matrix_HG_U133A_2 <- ReadAffy(filenames = split_list$`HG-U133A_2`) #GPL571
+
+GEO_microarray_matrix_HT_HG_U133A <- ReadAffy(filenames = split_list$`HT_HG-U133A`) #GPL3921
+
+#Run the RMA normalization on each affymatrix
+
+norm_HG_U133A_2 <- rma(ReadAffy(filenames = split_list$`HG-U133A_2`))
+
+norm_HT_HG_U133A <- rma(GEO_microarray_matrix_HT_HG_U133A)
+
+#Get Expression Estimates
+
+norm_HT_HG_U133A <- exprs(norm_HT_HG_U133A)
+
+norm_HG_U133A_2 <- exprs(norm_HG_U133A_2)
+
+#Map probes to Gene Symbol
+
+GSE <- getGEO(
+  GEO = "GSE14520",
+  GSEMatrix = TRUE
+)
+
+#Extract the probes from the GSE 
+probes_GPL3921 <- GSE$`GSE14520-GPL3921_series_matrix.txt.gz`@featureData@data
+probes_GPL3921 <- GPL3921 %>% dplyr::select(ID,`Gene Symbol`)
+
+probes_GPL571 <- GSE$`GSE14520-GPL571_series_matrix.txt.gz`@featureData@data
+probes_GPL571 <- probes_GPL571 %>% dplyr::select(ID, `Gene Symbol`)
+
+
+
+#Combine the Normalized matrices into a single matrix
+
+#The GPL571 affymatrix set
+norm_HG_U133A_2 <- norm_HG_U133A_2 %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+  left_join(., probes_GPL3921, by = "ID")
+
+#The GPL3921 affymatrix set
+norm_HT_HG_U133A <- norm_HT_HG_U133A %>%
+  as.data.frame() %>%
+  rownames_to_column(., var = "ID") %>%
+  left_join(., probes_GPL571, by = "ID")
+
+Normalized_Microarray <- cbind(norm_HG_U133A_2, norm_HT_HG_U133A)
+
+#Get Metadata
+
+GSE <- getGEO(
+  GEO = "GSE14520",
+  GSEMatrix = TRUE
+)
+
+#Extracting the two metadata sets where the first one is the U133A or GPL3921 and the second one is the U133A_2 or GPL571 which is the other affymatrix. Then, they are bound together
+GEO_metadata_GPL3921 <- pData(phenoData(GSE[[1]]))
+
+GEO_metadata_GPL571 <- pData(phenoData(GSE[[2]]))
+
+#Since the metadata columns are not exactly the same length, we will need to filter the column names in the larger one by the smaller one
+
+col_select <- colnames(GEO_metadata_GPL3921) %in% colnames(GEO_metadata_GPL571)
+
+#Remove the columns that are not in both in the larger metadata set and then combine the datasets
+GEO_metadata_GPL3921 <- GEO_metadata_GPL3921[ , col_select]
+
+GEO_metadata <- rbind(GEO_metadata_GPL3921, GEO_metadata_GPL571)
+
+#Extract a way to look at each individual irrespective of whether each sample is a tumor or non-tumor sample
+GEO_metadata <- GEO_metadata %>% 
+  mutate(ID = str_remove_all(`Individual:ch1`, ".$"))
+
+#####Download the Clinical Data from the Extra supplement
+
+#Makes a connection using the url, ensuring it open to "rb" which is the mode of the file, and then gzcon is used to decompress it
+
+link <- gzcon(url("https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE14520&format=file&file=GSE14520%5FExtra%5FSupplement%2Etxt%2Egz", open = "rb"))
+
+#The decompressed file is read into R using ReadLines
+txt <- readLines(con = link, warn = FALSE)
+
+#Convert to a Table to read in the clinical data
+GEO_clinical <- read.table(
+  text = txt,
+  sep = "\t",
+  header = TRUE,
+  quote = "",
+  comment.char = "",
+  stringsAsFactors = FALSE
+)
+
+```
+
+#Further Processing
+
+In Zhu et al 2018, they exclude 5 patient with tumors because there is no connected survival data as well as 22 patients from the GPL571 affymatrix. However, since they do not give the criteria for those patients being removed and I was unable to figure out what it could be, I will keep them for this analysis. This is a likely contributor of results being slightly different than the actual results in Zhu et al 2018. After that, I need to filter so the Normalized_Microarray, Metadata, and Clinical data are all matching which samples
+
+```{r}
+#They potentially removed patients with tumors who did not have a correlated non-tumor tissue, but but that removes 18 patients + 5 from not having survival data means we would remove 23, not 22 patients. Its an optional step. If this occurs, you will need to remove from the column names of Normalized_Microarray and GEO_Clinical samples that match these values before saving.
+GEO_metadata <- GEO_metadata %>% group_by(ID) %>% filter(n() < 2)
+no_corresponding_nontumor_sample <- GEO_metadata$geo_accession
+
+#remove extra letters from the colnames
+
+colnames(Normalized_Microarray) <- gsub(".CEL.gz","",colnames(Normalized_Microarray))
+
+#Identify if there are duplicated rows. It turns out there are no duplicated probes, but there are duplicated symbols. However, for my analysis, I will keep the probes as the identifier in this step.
+sum(duplicated(Normalized_Microarray$`Gene Symbol`))
+sum(duplicated(Normalized_Microarray$`ID`))
+
+#Remove unneeded columns
+Normalized_Microarray <- Normalized_Microarray %>%
+  column_to_rownames(., var = "ID") %>% 
+  dplyr::select(-ID, -`Gene Symbol`)
+
+#Dropping the examples where are 5 patients with tumors who have no survival data. When a sample has no associated survival data and is a tumor sample, we will remove them.
+GEO_clinical <- GEO_clinical %>%
+  mutate(REMOVE = if_else(is.na(Survival.status) == TRUE & `Tissue.Type` == "Tumor", TRUE, FALSE)) %>%
+  filter(REMOVE == FALSE)
+
+#Now, we are going to filter the column names from the Normalized Matrix that match the Affy_GSM in GEO_clinical so that we only keep the sample IDs that we have clinical data for.
+
+Normalized_Microarray <- Normalized_Microarray[ , colnames(Normalized_Microarray) %in% GEO_clinical$Affy_GSM]
+
+#We can do the same for the metadata
+
+GEO_metadata <- GEO_metadata %>%
+  filter(geo_accession %in% GEO_clinical$Affy_GSM)
+
+#Save the Normalized_Microarray, GEO_Metadata, and GEO_clinical data
+
+saveRDS(Normalized_Microarray, file = file.path(Data_Import, "Normalized_Microarray.rds"))
+saveRDS(GEO_metadata, file = file.path(Data_Import, "Microarray_Metadata.rds"))
+saveRDS(GEO_clinical, file = file.path(Data_Import, "Microarray_Clinical_data.rds"))
+
+
+
+```
+
+d

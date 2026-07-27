@@ -1,0 +1,101 @@
+---
+title: "PPI_Protein_Analysis"
+output: html_document
+---
+
+#Import the R libraries and relevant data paths
+
+```{r}
+library(tidyverse)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(edgeR)
+library(annotables)
+library(here)
+library(STRINGdb)
+library(igraph)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+#Import the Differential Expression results from EdgeR and filter where the FDR < 0.05 which means it is statistically significant.
+
+The differential expression results were imported and then filtered for when the FDR < 0.05 so that only the genes
+
+```{r}
+Differential_Expression_Results <- readRDS(file = file.path(Data_Import, "edgeR_DEG_Results.rds"))
+
+Differential_Expression_Results <- Differential_Expression_Results %>%
+  rownames_to_column(., var = "Symbol") %>%
+  filter(FDR < 0.05)
+```
+
+
+#Turn on Stringdb
+
+Unfortunately, version 9 is not a valid version as of now, so instead of Version 9.0 being used, the most recent version 12.0 will be used. This could cause some differences in the results. However, since the differential gene expression already has some differences between what is reported in Zhu et al 2018 and this reproduction, this protein-protein interaction analysis will likely have the same issue.
+
+```{r}
+ string_db <- STRINGdb$new( version="12.0", 
+                            species=9606,
+            score_threshold=400, #Equal to a confidence score of 0.4 (bottom end of medium confidence) on the website 
+            network_type="full", 
+            link_data='full', input_directory="")
+```
+
+#Map the Genes into the StringDB
+
+```{r}
+Mapped_Genes <- string_db$map(Differential_Expression_Results, "Symbol", removeUnmappedRows = TRUE)
+```
+
+
+#Map the hits
+ 
+In Zhu et al 2018, they only use the top 10 genes that are mapped to be used in the PPI network. However, these genes end up being different than the Top 10 genes shown in Zhu et al 2018. However, these are the results that we shown. The differences are likely due to the different version of striingdbr and the differential expression analysis not being exactly the same
+
+```{r}
+ hits <- Mapped_Genes$STRING_id[1:10]
+
+png(filename = file.path(Figure_Export, "PPI_Plot_10_Genes.png"),
+    width = 480, height = 480, units = "px")
+
+string_db$plot_network(hits)
+
+dev.off()
+```
+
+
+
+
+#In this paper, they look at the Top 10 Hub genes which I presume are the genes with the most interactions with other genes
+
+Since they look specifically at the hub genes, another way perhaps that they identified them is looking for the interactions. However, it is unclear from the paper what exactly they looked at because the results are so different. Therefore, this code chunk will be kept but the results are quite a bit different.
+
+```{r}
+#Extract the protein-protein interactions from the stringdb obect.
+interactions <- string_db$get_interactions(Mapped_Genes$STRING_id)
+
+#Convert into an igraph obect
+interact_data <- graph_from_data_frame(d = interactions, directed = FALSE)
+
+# Calculate the degree (number of connected proteins) for each node
+degrees <- degree(graph = interact_data)
+
+# Convert to a sorted data frame (from highest to lowest # of connections)
+HUB_GENE_DEGREES <- data.frame(
+  Protein = names(degrees),
+  Connected_Proteins = degrees) %>%
+  arrange(., desc(Connected_Proteins))
+
+#Extract the Protein-ids and their relevant gene names
+all_proteins <- string_db$get_proteins()
+
+#merge with HUB_GENE_DEGREES
+
+HUB_GENE_DEGREES <- HUB_GENE_DEGREES %>%
+  left_join(., y = all_proteins, by = c("Protein" = "protein_external_id"))
+```

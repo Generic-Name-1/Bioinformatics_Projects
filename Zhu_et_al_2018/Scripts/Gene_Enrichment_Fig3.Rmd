@@ -1,0 +1,399 @@
+---
+title: "Gene_Enrichment_Fig3"
+output: html_document
+---
+
+
+The purpose of this script is to reproduce the over-representation analysis performed in Figures 3 and 4 in Zhu et al 2018. However, they note in their analysis that they used the DAVID functional annotation portal online to do their over-representation analysis. However, when trying to perform the analysis on the DAVID website, I was having difficulty getting the program to work and upload my gene list to the DAVID website. However, so although these results are not from DAVID, it demonstrates the method for how to obtain the over-representation analysis data from the same dataset using a different method.
+
+
+# Activate the Relevant Libraries
+
+For all analysises, the first step is to activate the relevant R libraries and set up the pathways to export the Figures as well as importing the relevant data.
+```{r}
+library(tidyverse)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(here)
+library(msigdbr)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+#Import the results file previously generated
+
+Now, I will import the Differential Expression Analysis result that were generated for Figure 1 from EdgeR. Remember that the results are comparing the Primary Tumor comared to Solid Normal tissue where the solid normal tissue is the reference. Furthermore, I wanted to isolate the background for the over representation analysis that will be performed. Instead of using the entire gene library (which is automatically performed when not provided a special background), I wanted to include the background genes as all the genes that were measured from the TCGA analysis. In order to do this, I imported the data that was converted into CPM (or Counts per million) and extracted the rownames which is equal to all the different genes expressed that were measured even if there was not a statistically significant difference in expression.
+
+```{r}
+results <- readRDS(file = file.path(Data_Import, "edgeR_DEG_Results.rds"))
+
+results <- results %>%
+  rownames_to_column(., var = "gene_symbol")
+
+#Remove all non-statistically significant differentially expressed genes.
+result_filtered <- results %>%
+  filter(FDR < 0.05) %>% distinct()
+
+
+#Extract the Background Genes that we will use the CPM_Counts.rds filel which has the gene symbols. We will use this as the background because these are all the genes that we measured in the original dataset.
+
+Background <- readRDS(file = file.path(Data_Import, "CPM_Counts.rds")) 
+Background <- rownames(Background)
+```
+
+#Import the Gene Categories needed to do the Pathway Expression Analysis
+
+Here, I imported the functional annotation sets that were used in the later analysis. Originally, I tried to use the org.Hs.eg.db package, however I was having difficulty importing the annotation sets with the relevant symbols. Therefore, I decided to try two different methods of importing the data. First, I went to the Broad Institute and downloaded the GMT annotation files for the specific annotation sets that I want to use Gene Ontology: Biological Processes, Cellular Components, and Molecular Functionas as well as the LEGACY annotation from the Kyoto Encyclopedia of Genes and Genomes.
+```{r}
+
+#Using org.Hs.eg.db package directly to get teh ontology matching
+
+# GENES <- select(
+ # x = org.Hs.eg.db, 
+ # keys = result_filtered$gene_symbol,
+ # keytype = "SYMBOL",
+ # columns = c("SYMBOL", "ENTREZID", "ENSEMBL", "ONTOLOGYALL"))
+
+GO_BP <- read.gmt(file.path(here(),"GMT annotation file", "c5.go.bp.v2025.1.Hs.symbols.gmt"))
+GO_CC <- read.gmt(file.path(here(),"GMT annotation file", "c5.go.cc.v2025.1.Hs.symbols.gmt"))
+CP_KEGG <- read.gmt(file.path(here(),"GMT annotation file", "c2.cp.kegg_legacy.v2025.1.Hs.symbols.gmt"))
+GO_MF <- read.gmt(file.path(here(),"GMT annotation file", "c5.go.mf.v2025.1.Hs.symbols.gmt"))
+```
+
+#Extract Gene Symbols and ENTREZ ID
+
+Through the AnnotationDBI Package and a couple packages, I will extract a key to match Gene Symbols with the Entrez ID which will be needed for the enrichKEGG() function if it is to be used as an alternative to the GMT files that were manually downloaded. However, through the different method I was using to get all of the entrez IDs was leaving quite a few NAs that were hard to fully pin down. Therefore, I decided to use the CP_KEGG Legacy gmt file that was downloaded from the as well as the relevant files for each of the different file. Nevertheless, I extract the ENTREZ ID to SYMBOL conversion using the annotation DBI package
+```{r}
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+hs_genes <- genes(txdb)
+
+gene_symbols_annotationdbi <- AnnotationDbi::select(org.Hs.eg.db, keys = hs_genes$gene_id,
+                                                    columns = c("SYMBOL"),
+                                                    keytype = c("ENTREZID"))
+
+
+```
+
+
+#Extract the Upregulated and Downregulated Genes
+
+Since Zhu et al 2018 performed over-representation analysis with upregulated and downregulated genes, the genes that were upregulated in tumors compared to normal tissue and downregulated in tumors needed to be isolated from each other.
+```{r}
+result_filtered <- result_filtered %>%
+  mutate(FC = 10^(logFC)) %>%
+  left_join(. , gene_symbols_annotationdbi, by = c("gene_symbol" = "SYMBOL")) %>% distinct()
+
+#There turns out that when using this method to extract the gene symbols
+sum(is.na(result_filtered$ENTREZID))
+
+downregulated_results <- result_filtered %>%
+  filter(FC < 1)
+
+upregulated_results <- result_filtered %>%
+  filter(FC > 1)
+  
+```
+
+
+#Look at the KEGG LEGACY
+
+Using the KEGG Legacy functional annotation set. At first, I tried to use the enrichKEGG package which is supposed to directly access the KEGG database, but the
+```{r}
+
+#KEGG Legacy Gene Annotation
+CP_KEGG_UPREGULATED_RESULTS <- enricher(gene = upregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = CP_KEGG)
+
+CP_KEGG_UPREGULATED_RESULTS <- as.data.frame(CP_KEGG_UPREGULATED_RESULTS)
+
+#Using the enrichKEGG function
+
+# CP_KEGG_UPREGULATED_RESULTS_2 <- enrichKEGG(gene = upregulated_results$ENTREZID,
+#                                            pvalueCutoff = 0.05,
+#                                            universe = Background,)
+
+
+#Making the Graph
+
+png(filename = file.path(Figure_Export, "Over_Representation_upregulated_KEGG_LEGACY_Fig3d.png"),
+    width = 1024, height = 768, units = "px")
+
+CP_KEGG_UPREGULATED_RESULTS %>%
+  mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  head(10) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+  labs(fill = "-log10(pvalue)",
+       title = "Upregulated Genes from TCGA-LIHC: KEGG LEGACY")
+
+dev.off()
+```
+
+
+#Look at the Upregulated Gene Ontology Molecular Function set
+
+In this chunk, I actually use 3 different methods to see how the results are slightly different even though only the figure with the functional annotation directly from the GMT file will be used to make a figure. The first option is to use the msigdbr package to extract the functional annotation before using the enricher() function. The 2nd option is to use the enrichGO function which pulls the functional annotation set from an online database. The 3rd option is to use the .GMT file downloaded from the Broad institute as the file for the over-representation analysis. For the examples where there were less than 10 pathway that were hit, I didn't filter for the top 10 pathways filtered by FoldEnrichment; however, for the pathway that had more than 10, only the top 10 pathways were shown.
+
+```{r}
+
+#Method 1: Using the msigdbr package to extract the Functional Gene annotation file before using it in the Over Representation Analysis
+Gene_categories <- msigdbr(species = "Homo sapiens", collection = "C5", subcollection = "MF")
+
+Gene_categories <- Gene_categories %>% dplyr::select(gs_name, gene_symbol)
+
+#Running using Enricher()
+GO_MF_UPREGULATED <- enricher(gene = upregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = Gene_categories)
+
+GO_MF_UPREGULATED <- as.data.frame(GO_MF_UPREGULATED)
+
+# Method 2: Extracted the EnrichGO function from enricher profiler rather than using the enricher() which is a more generic function which pulls from the same database but all in one function
+
+GO_MF_UPREGULATED_2 <- enrichGO(gene = upregulated_results$gene_symbol,
+                                OrgDb = "org.Hs.eg.db",
+                                keyType = "SYMBOL",
+                                universe = Background,
+                                ont = "MF")
+
+GO_MF_UPREGULATED_2 <- as.data.frame(GO_MF_UPREGULATED_2)
+
+#Method 3: Extracted using downloaded annotation files from the Broad Institute for the GO_MF File
+
+GO_MF_UPREGULATED_3 <- enricher(gene = upregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = GO_MF)
+
+GO_MF_UPREGULATED_3 <- as.data.frame(GO_MF_UPREGULATED_3)
+
+
+#Create a graph 
+
+png(filename = file.path(Figure_Export, "Over_Representation_upregulated_MF_Fig3c.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_MF_UPREGULATED_3 %>%
+    mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  #head(5) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+  labs(fill = "-log10(pvalue)",
+       title = "Upregulated Genes from TCGA-LIHC: Molecular Function")
+
+dev.off()
+
+```
+
+#Look at the Upregulated Gene Ontology Biological Process set
+
+Creating a graph for the upregulated genes using Gene Annotation Biological Processes GMT file from the BROAD Institute.
+```{r}
+GO_BP_upreg <- enricher(gene = upregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = GO_BP)
+
+GO_BP_upreg <- as.data.frame(GO_BP_upreg)
+
+#Create a graph
+
+png(filename = file.path(Figure_Export, "Over_Representation_upregulated_BP_Fig3a.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_BP_upreg %>%
+  mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  head(10) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+  labs(fill = "-log10(pvalue)",
+       title = "Upregulated Genes from TCGA-LIHC: Biological Process")
+
+dev.off()
+```
+
+#Look at the Upregulated Gene Ontology Cellular Component Analysis
+
+Creating a graph for the upregulated genes using Gene Annotation Cellular Component GMT file from the BROAD Institute.
+```{r}
+GO_CC_upreg <- enricher(gene = upregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = GO_CC)
+
+GO_CC_upreg <- as.data.frame(GO_CC_upreg)
+
+#Create a Graph
+png(filename = file.path(Figure_Export, "Over_Representation_upregulated_CC_Fig3b.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_CC_upreg %>%
+  mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  head(10) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+  labs(fill = "-log10(pvalue)",
+       title = "Upregulated Genes from TCGA-LIHC: Cellular Component")
+
+dev.off()
+```
+
+
+
+## Over Representation Analysis with the downregulated genes
+
+#Gene Ontology Molecular Function
+
+Creating a graph for the downregulated genes using Gene Annotation Molecular Function GMT file from the BROAD Institute.
+```{r}
+GO_MF_DOWNREGULATED <- enricher(gene = downregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = GO_MF)
+
+GO_MF_DOWNREGULATED <- as.data.frame(GO_MF_DOWNREGULATED)
+
+png(filename = file.path(Figure_Export, "Over_Representation_downregulated_MF_Fig4c.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_MF_DOWNREGULATED %>%
+    mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  head(10) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+   labs(fill = "-log10(pvalue)",
+       title = "Downregulated Genes from TCGA-LIHC: Molecular Function")
+
+dev.off()
+```
+
+#KEGG LEGACY
+
+Creating a graph for the downregulated genes using Gene Annotation KEGG LEGACY GMT file from the BROAD Institute.
+
+```{r}
+CP_KEGG_DOWNREGULATED_RESULTS <- enricher(gene = downregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = CP_KEGG)
+
+CP_KEGG_DOWNREGULATED_RESULTS <- as.data.frame(CP_KEGG_DOWNREGULATED_RESULTS)
+
+png(filename = file.path(Figure_Export, "Over_Representation_downregulated_KEGG_LEGACY_Fig4d.png"),
+    width = 1024, height = 768, units = "px")
+
+CP_KEGG_DOWNREGULATED_RESULTS %>%
+    mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  head(10) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+   labs(fill = "-log10(pvalue)",
+       title = "Downregulated Genes from TCGA-LIHC: KEGG LEGACY")
+
+dev.off()
+
+```
+
+#Gene Ontology Biological Processes
+
+Creating a graph for the downregulated genes using Gene Annotation Biological Processes GMT file from the BROAD Institute.
+
+```{r}
+GO_BP_DOWNREGULATED <- enricher(gene = downregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = GO_BP)
+
+GO_BP_DOWNREGULATED <- as.data.frame(GO_BP_DOWNREGULATED)
+
+
+png(filename = file.path(Figure_Export, "Over_Representation_downregulated_BP_Fig4a.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_BP_DOWNREGULATED %>%
+    mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  head(10) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+   labs(fill = "-log10(pvalue)",
+       title = "Downregulated Genes from TCGA-LIHC: Biological Process")
+
+dev.off()
+```
+
+# Gene Ontology Cellular Component
+
+Creating a graph for the downregulated genes using Gene Annotation Cellular Component GMT file from the BROAD Institute.
+
+```{r}
+GO_CC_DOWNREGULATED <- enricher(gene = downregulated_results$gene_symbol,
+                                        pvalueCutoff = 0.05,
+                                        universe = Background,
+                                        TERM2GENE = GO_CC)
+
+GO_CC_DOWNREGULATED <- as.data.frame(GO_CC_DOWNREGULATED)
+
+png(filename = file.path(Figure_Export, "Over_Representation_downregulated_CC_Fig4b.png"),
+    width = 1024, height = 768, units = "px")
+
+GO_CC_DOWNREGULATED %>%
+  mutate(negative_log10pval = -log10(pvalue)) %>%
+  filter(qvalue < 0.05) %>%
+  arrange(., desc(FoldEnrichment)) %>%
+  head(10) %>%
+  ggplot(aes(x= Description, y = Count, fill = negative_log10pval))+
+  geom_col()+
+  coord_flip()+
+  scale_fill_gradient(high = "red", low = "blue")+
+  theme_classic()+
+  labs(fill = "-log10(pvalue)",
+       title = "Downregulated Genes from TCGA-LIHC: Cellular Component")
+
+dev.off()
+```
+
