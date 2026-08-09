@@ -53,7 +53,7 @@ output <- getResults(TCGA_HNSC)
 
 ###Step 3: Import the clinical metadata
 
-Along with the raw counts downloaded from the TCGA-HNSC cohort, the clinical data for each of the samples is important for later analysis should be downloaded.
+Along with the raw counts downloaded from the TCGA-HNSC cohort, the clinical data for each of the samples is important for later analysis should be added to an object in R.
 
 ```{r}
 clinical_data <- GDCquery_clinic("TCGA-HNSC",
@@ -129,7 +129,7 @@ hnsc_matrix <- hnsc_matrix %>%
   rownames_to_column(., var = "ensgene") %>% 
   mutate(ensgene = str_remove(ensgene,"\\..*")) %>% #Used to remove the ends that differentiates the transcripts but I am doing gene level, not transcript level analysis.
   group_by(ensgene) %>%
-  summarize(across(everything(), mean)) %>% #Changed to mean from sum
+  summarize(across(everything(), sum)) %>%
   column_to_rownames(., var = "ensgene")
 
 ```
@@ -147,7 +147,7 @@ dds <- DESeqDataSetFromMatrix(countData = hnsc_matrix, #Where the matrix data is
 
 #Step 9: DESeq cleaning
 
-Although Katase et al 2026 did not provide their code, so we are unsure if they removed low counts, it seems to be good practice to remove low couts so genes where the total counts is less than 10 are removed. This will speed up downstream analysis and remove background that make affect results.
+Although Katase et al 2026 did not provide their code, so it is unclear if they removed low counts, it seems to be good practice to remove low counts so genes where the total counts is less than 10 are removed. This will speed up downstream analysis and remove background that may affect results.
 
 ```{r}
 dds <- dds[rowSums(counts(dds)) >= 10,]

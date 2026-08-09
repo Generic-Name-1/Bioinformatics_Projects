@@ -63,7 +63,7 @@ downregulated_Gene_enrichment <- Gene_Enrichment %>% filter(log2FoldChange < 0) 
 
 #Get background gene sets
 
-I can either download the .gmt files directly from the Broad Institute from [USCB](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp). Furthermore, it actually looks like they have their own package to run this type of analysis which I can check out. In this first codechunk, I use the Hallmark gene annotation set from the msigdbr package.
+I can either download the .gmt files directly from the Broad Institute from [USCB](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp). Furthermore, it actually looks like they have their own package to run this type of analysis which I can check out. In this first codechunk, I obtain the Hallmark gene annotation set from the msigdbr package.
 
 ```{r}
 library(msigdbr)
@@ -94,7 +94,7 @@ KEGG_LEGACY1 <- read.gmt(file.path(here(),"GMT annotation file", "c2.cp.kegg_leg
 #KEGG_LEGACY <- KEGG_LEGACY %>% dplyr::select(gs_name, gene_symbol)
 ```
 
-touch Katase_et_al_2026/.gitkeep
+
 ### Run the ClusterProfiler Analysis to run the Over Representation Analysis
 
 Now, a Gene Enrichment Analysis will be performed using the enricher() function where I use the relevant gene annotation sets that were imported previously to generate the analysises and convert them into data frames. After the result for the GOBP, GOCC, GOMF and KEGG Legacy gene annotation sets are obtained, graphs will be created to reproduce the 4 figures.
@@ -130,8 +130,9 @@ KEGG_LEGACY_results <- as.data.frame(KEGG_LEGACY_results)
 
 ```
 
-Copy to clipboard so I can copy and paste into ShinyGo
+#If I want to copy the objects to clipboard and add to ShinyGO to see if I can reproduce in the ShinyGO portal.
 
+```{r}
 clip <- pipe("pbcopy", "w")                       
 write.table(GO_BP1$gene, file=clip, sep = '\t', row.names = FALSE)  
 close(clip)
@@ -139,6 +140,8 @@ close(clip)
 clip <- pipe("pbcopy", "w")                       
 write.table(upregulated_Gene_enrichment$symbol, file=clip, sep = '\t', row.names = FALSE)  
 close(clip)
+```
+
 
 
 #Reproduce Fig 3a
@@ -255,7 +258,7 @@ dev.off()
 
 ### Run Alternative Analysises
 
-While the above chunks of code reproduce or attempt to reproduce Figures 3a-3d in Katase et al 2026, there can be alternative analysises through the use of the more generic hallmark gene annotation sets. Rather than just looking at which genes are enriched from upregulation, we can also identify which genes are enriched during the downregulation in the Head and Neck Cancer tumors compared to normal tissue. In this case, we run the enricher() function on the upregulated and downregulated genes and produce the relevant plots. Another alternative is to run the 4 gene annotation sets on the downregulated genes  rather than just the upregulated genes
+While the above chunks of code reproduce or attempt to reproduce Figures 3a-3d in Katase et al 2026, there can be alternative analyses through the use of the more generic hallmark gene annotation sets. Rather than just looking at which genes are enriched from upregulation, we can also identify which genes are enriched during the downregulation in the Head and Neck Cancer tumors compared to normal tissue. In this case, we run the enricher() function on the upregulated and downregulated genes and produce the relevant plots. Another alternative is to run the 4 gene annotation sets on the downregulated genes  rather than just the upregulated genes
 
 ```{r}
 #Upregulated

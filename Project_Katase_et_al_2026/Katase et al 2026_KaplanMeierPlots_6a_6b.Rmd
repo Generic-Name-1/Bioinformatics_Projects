@@ -6,6 +6,10 @@ output: html_document
 
 
 In this R Markdown document, the Kaplan Meier curves will be reproduced from figures 6a and 6b from Katase et al 2026.
+
+
+#Open the relevant R Libraries, file pathways, and relevant objects
+
 ```{r}
 
 
@@ -30,6 +34,7 @@ Data_Import <- file.path(here(), "Data")
 
 ```
 
+#Import the Clinical Data, metadata, coldata,
 
 ```{r}
 
@@ -119,18 +124,22 @@ upregulated_vst <- filtered %>%
 
 #Kaplan Survival Curve for the CA9 gene
 
-In this code chunk, a survival curve will be generated for
+This code may be more confusing than it needs to be, but it was used to make a function to automatically do much of this same analysis.
+
 ```{r}
 GENE <- "CA9"
 
+#Isolate the final data
 final_data <- upregulated_vst %>%
     #  filter(symbol == GENE) %>%
       left_join(., clinical_data, by = c("patient" = "bcr_patient_barcode")) %>%
       mutate(deceased = if_else(vital_status == "Alive", 0, 1),
              time_in_months = survival_length / 30.41) 
 
+#Run a fit
 fit <- survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = final_data)
 
+#Generate the Plot
 plot <- ggsurvplot(fit,
            data = final_data,
            pval = T, 
@@ -138,6 +147,7 @@ plot <- ggsurvplot(fit,
            title = GENE,
            fun = "pct")
 
+#Isolate the # of patients that are in risk from the survival table
 Strata_count <- plot$data.survtable %>% filter(pct.risk == 100)
 High_N <- Strata_count[1,"n.risk"]
 Low_N <- Strata_count[2,"n.risk"]
@@ -150,6 +160,8 @@ plot$plot + theme(plot.title = element_text(face = "bold", hjust = 0.5))+
 ```
 
 Survival Graphs Function
+
+This function should be usable for this dataset, but was not customized enough to ensure that I could use this same function applying other datasets.
 
 ```{r}
 
@@ -240,8 +252,6 @@ FINAL_PLOT[[i]] <- g$plot + theme(plot.title = element_text(face = "bold", hjust
       
       print(FINAL_PLOT)    
 }
-
-
 
 ```
 
