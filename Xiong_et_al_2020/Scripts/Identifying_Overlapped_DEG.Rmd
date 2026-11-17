@@ -1,0 +1,329 @@
+---
+title: "Identifying_Overlapped_DEG"
+output: html_document
+---
+
+#Import Libraries
+
+Import the Libraries needed for the relevant vver-representation analysis.
+
+```{r}
+library(tidyverse)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(patchwork)
+        
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+
+#Import the Differential Expression of Genes for each of the 4 datasets and Extract the Significant results
+
+Import the Differential Gene Expression for each of the 4 datasets in the same format that Xiong et al 2020 performed (TCGA-LUAD was done on DESeq2 while the GEO datasets were performed using limma) and perform relevant filtering for significant differentially expressed genes in each dataset.
+
+```{r}
+#Import Results
+TCGA_LUAD_results <- readRDS(file.path(Data_Import, "TCGA-LUAD_DEG_results.rds"))
+
+GSE43458_DEG_results <- readRDS(file.path(Data_Import, "GSE43458_DEG_results.rds"))
+
+GSE10072_DEG_results <- readRDS(file.path(Data_Import, "GSE10072_DEG_results.rds"))
+
+GSE32863_DEG_results <- readRDS(file.path(Data_Import, "GSE32863_DEG_results.rds"))
+
+#Filter out non-significant Genes
+
+List_of_results <- list(TCGA_LUAD_results, GSE43458_DEG_results, GSE10072_DEG_results, GSE32863_DEG_results)
+
+#For Loop to filter out the non-significant genes
+for (i in 1:length(List_of_results)) {
+  
+  Data <- List_of_results[[i]] #Extract each dataset for the loop
+  
+  Data <- as.data.frame(Data) #Ensure its in the format of a dataframe
+  
+  Data <- Data %>% #Filter out genes that have "No Significance"
+    filter(Significance != "No Significance") %>%
+    rownames_to_column(., var = "Gene_Symbol")
+  
+  #print(Data)
+  
+  List_of_results[[i]] <- Data #Add the new set back to the List
+ 
+}
+
+#Extract the results for each dataframe in the list to extract only the significant genes
+TCGA_LUAD_results <- List_of_results[[1]]
+
+GSE43458_DEG_results <- List_of_results[[2]]
+
+GSE10072_DEG_results <- List_of_results[[3]]
+
+GSE32863_DEG_results <- List_of_results[[4]]
+
+#Remove this object
+rm(Data)
+```
+
+
+#Extract the Significant Genes based on whether they are Up-regulated or Downregulated
+
+This splitting can be done with split() in Base R or nest() in dplyr, but each dataframe will be split into another list based on whether they are upregulated or downregulated. They will be extracted so they can be compared to each other to look for genes that were upregulated or downregulated respectively in all 4 datasets.
+
+```{r}
+#Split each dataframe into a list with 2 dataframes determined by whether the genes were upregulated or downregulated
+TCGA_LUAD_results <- split(TCGA_LUAD_results, TCGA_LUAD_results$Significance)
+
+GSE10072_DEG_results <- split(GSE10072_DEG_results, GSE10072_DEG_results$Significance)
+
+GSE32863_DEG_results <- split(GSE32863_DEG_results, GSE32863_DEG_results$Significance)
+
+GSE43458_DEG_results <- split(GSE43458_DEG_results, GSE43458_DEG_results$Significance)
+```
+
+#Isolate the List of Genes 
+
+The next step will identify whether a gene that is upregulated or downregulated is present in all 4 datasets as upregulated or downregulated respectively. A Venn Diagram will not be created as the authors of Xiong et al 2020 created, but the Genes that were found in all 4 datasets will be isolated.
+
+```{r}
+###Identify the Down regulated Genes in all of the data sets
+
+#Choose any of the data sets, of which the largest was chosen, as the basis to check all the other datasets. 
+Downregulated_Genes <- TCGA_LUAD_results[["Downregulated"]][["Gene_Symbol"]]
+
+#Create a logical vector equal to the length of that data set
+Gene_Check <- logical(length(Downregulated_Genes))
+
+#GSE NCBI GEO Dataset Downregulated Genes
+GSE32863 <- GSE32863_DEG_results[["Downregulated"]][["Gene_Symbol"]]
+GSE10072 <- GSE10072_DEG_results[["Downregulated"]][["Gene_Symbol"]]
+GSE43458 <- GSE43458_DEG_results[["Downregulated"]][["Gene_Symbol"]]
+
+#Create a loop to check for each Gene Symbol in the Downregulated_Genes set is in each of the others
+for (i in seq_along(Downregulated_Genes)){
+
+  #Extracts the Gene in LUAD
+  Symbol = Downregulated_Genes[i]
+  
+  #Check to see if its in all of the other 3 datasets and if the Gene is, the logical becomes true, if not it becomes false
+  Gene_Check[i] <- all(Symbol %in% GSE32863, 
+                                Symbol %in% GSE10072,
+                                Symbol %in% GSE43458)
+}
+
+#Filter the Downregulated Genes using the logical based on whether the gene is also in each of the other 3 datasets.
+Downregulated_Genes <- Downregulated_Genes[Gene_Check]
+
+
+
+### Identify the Upregulated Genes in all of the datasets
+
+Upregulated_Genes <- TCGA_LUAD_results[["Upregulated"]][["Gene_Symbol"]]
+
+Gene_Check_Upreg <- logical(length(Upregulated_Genes))
+
+#GSE NCBI GEO Dataset Upregulated Genes
+GSE32863_up <- GSE32863_DEG_results[["Upregulated"]][["Gene_Symbol"]]
+GSE10072_up <- GSE10072_DEG_results[["Upregulated"]][["Gene_Symbol"]]
+GSE43458_up <- GSE43458_DEG_results[["Upregulated"]][["Gene_Symbol"]]
+
+for (i in seq_along(Upregulated_Genes)){
+
+  #Extracts the Gene in LUAD
+  Symbol = Upregulated_Genes[i]
+  
+  #Check to see if its in all of the other 3 datasets
+  Gene_Check_Upreg[i] <- all(Symbol %in% GSE32863_up, 
+                                Symbol %in% GSE10072_up,
+                                Symbol %in% GSE43458_up)
+}
+
+#Select the Upregulated Genes
+Upregulated_Genes <- Upregulated_Genes[Gene_Check_Upreg]
+
+#Save the Upregulated and Downregulated Gene List
+writeLines(Upregulated_Genes, file.path(Data_Import, "Upregulated_Genes.txt"))
+
+writeLines(Downregulated_Genes, file.path(Data_Import, "Downregulated_Genes.txt"))
+```
+
+
+#Run Over Representation Analysis on Upregulated Genes
+
+Now that a list of genes was identified that was differentially upregulated in all 4 datasets, over-representation analysis will be performed.
+
+```{r}
+#Run the Enrichment analysis using Clusterprofiler enrichGO() function where it pulls the enrichment list that was predownloaded.
+Upregulated_Gene_Ontology <- enrichGO(gene = Upregulated_Genes,
+                                      OrgDb = 'org.Hs.eg.db',
+                                      keyType = "SYMBOL",
+                                      pool = FALSE,
+                                      ont = "ALL",
+                                      pAdjustMethod = "BH",
+                                      pvalueCutoff = 0.05)
+
+Upregulated_Gene_Ontology <- as.data.frame(Upregulated_Gene_Ontology)
+
+#Upregulated Gene Ontology Graph
+Upregulated_Gene_Ontology %>%
+  mutate(ordered_pval = -log10(p.adjust)) %>%
+  group_by(ONTOLOGY) %>%
+  slice_head(n = 10) %>%
+  ggplot(aes(x = fct_reorder(Description, ordered_pval), y = -log10(p.adjust), color = ONTOLOGY))+
+  geom_point(size = 3)+
+  facet_wrap(~ONTOLOGY, nrow = 3, ncol = 1, scales = "free",
+             strip.position = "right")+
+  labs(x = "", title = "Upregulated Genes: Gene Ontology")+
+  theme(legend.position = "none",
+        axis.text.y = element_text(face = "bold", color = "black"),
+        axis.text = element_text(face = "bold", color = "black"))+
+    coord_flip()+
+  ylim(1,7)
+
+#Save the Graph
+ggsave(filename = file.path(Figure_Export, "Overrepresentation_Analysis_Upregulated.png"),
+       width = 8, height = 5)
+  
+```
+
+#Run Over Representation Analysis on Downregulated Genes
+
+Now that a list of genes was identified that were differentially downregulated in all 4 datasets, over-representation analysis will be performed.
+
+```{r}
+#Run the Enrichment analysis using Clusterprofiler enrichGO() function where it pulls the enrichment list that was predownloaded.
+Downregulated_Gene_Ontology <- enrichGO(gene = Downregulated_Genes,
+                                      OrgDb = 'org.Hs.eg.db',
+                                      keyType = "SYMBOL",
+                                      pool = FALSE,
+                                      ont = "ALL",
+                                      pAdjustMethod = "BH",
+                                      pvalueCutoff = 0.05)
+
+Downregulated_Gene_Ontology <- as.data.frame(Downregulated_Gene_Ontology)
+
+
+#Downregulated_Gene Graphs
+Downregulated_Gene_Ontology %>%
+mutate(ordered_pval = -log10(p.adjust)) %>%
+  group_by(ONTOLOGY) %>%
+  slice_head(n = 10) %>%
+  ggplot(aes(x = fct_reorder(Description, ordered_pval), y = -log10(p.adjust), color = ONTOLOGY))+
+  geom_point(size = 3)+
+  facet_wrap(~ONTOLOGY, nrow = 3, ncol = 1, scales = "free",
+             strip.position = "right")+
+  labs(x = "", title = "Downregulated Genes: Gene Ontology")+
+  theme(legend.position = "none",
+        axis.text.y = element_text(face = "bold", color = "black"),
+        axis.text = element_text(face = "bold", color = "black"))+
+    coord_flip()+
+  ylim(1,7)
+
+#Save the Graph
+ggsave(filename = file.path(Figure_Export, "Overrepresentation_Analysis_Downregulated.png"),
+       width = 8, height = 5)
+```
+
+#Run Enrichment on the Differentally Expressed Genes as a whole
+
+```{r}
+#Combine Vectors
+Genes_Overall <- c(Upregulated_Genes, Downregulated_Genes)
+#Look for Duplicate Genes
+Duplicated <- duplicated(Genes_Overall) 
+#Filter out duplicates
+Genes_Overall <- Genes_Overall[Duplicated == FALSE]
+
+#There were no duplicates which shouldn't be surprising since if a gene is upregulated, it can't be downregulated.
+
+Gene_Ontology_Overall <- enrichGO(gene = Genes_Overall,
+                                      OrgDb = 'org.Hs.eg.db',
+                                      keyType = "SYMBOL",
+                                      pool = FALSE,
+                                      ont = "ALL",
+                                      pAdjustMethod = "BH",
+                                      pvalueCutoff = 0.05)
+
+Gene_Ontology_Overall <- as.data.frame(Gene_Ontology_Overall)
+
+#Arrange by Genes in that grouping
+Gene_Ontology_Overall <- Gene_Ontology_Overall %>%
+  mutate(ONTOLOGY = case_when(ONTOLOGY == "BP" ~ "Biological Processes",
+    ONTOLOGY == "MF" ~ "Molecular Function",
+    ONTOLOGY == "CC" ~ "Cellular Component",
+    TRUE ~ "NA")) %>%
+  group_by(ONTOLOGY) %>%
+  arrange(desc(-log(p.adjust)))
+
+#Reproduced Graph 2B
+Gene_Ontology_Overall %>%
+  mutate(ordered_pval = -log10(p.adjust)) %>%
+  group_by(ONTOLOGY) %>%
+  slice_head(n = 10) %>%
+  ggplot(aes(x = fct_reorder(Description, ordered_pval), y = -log10(p.adjust), color = ONTOLOGY))+
+  geom_point(size = 3)+
+  facet_wrap(~ONTOLOGY, nrow = 3, ncol = 1, scales = "free",
+             strip.position = "right")+
+  labs(x = "", title = "Gene Ontology")+
+  theme(legend.position = "none",
+        axis.text.y = element_text(face = "bold", color = "black"),
+        axis.text = element_text(face = "bold", color = "black"))+
+    coord_flip()+
+  ylim(1,7)
+
+ggsave(filename = file.path(Figure_Export, "Overrepresentation_Analysis_Combined_Fig2B.png"),
+       width = 8, height = 5)
+  
+```
+
+# Run Over-representation Analysis on the overall differentially expressed gene set overall with KEGG
+
+```{r}
+#Choose Genes Overall which is already filtered
+glimpse(Genes_Overall)
+
+#Run Enrichment on KEGG (Kyoto Encyclopedia of Genes and Genomes)
+KEGG_enrich <- enrichKEGG(gene = Gene_Overall,
+           organism = 'org.Hs.eg.db',
+            keyType = "ncbi-geneid",
+            pAdjustMethod = "BH",
+            pvalueCutoff = 0.05)
+
+#Since the above connection does not work, the manual KEGG gmt file will be used that was downloaded from the Broad Institute Website here
+#[https://data.broadinstitute.org/gsea-msigdb/msigdb/release/7.0/]
+
+kegg_file <- read.gmt(gmtfile = file.path(Data_Import, "c2.cp.kegg.v7.0.symbols.gmt"))
+
+#Run manual KEGG enrichment
+
+KEGG_enrich <- enricher(
+  gene = Genes_Overall,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  TERM2GENE = kegg_file)
+
+KEGG_enrich <- as.data.frame(KEGG_enrich)
+
+KEGG_enrich %>%
+  mutate(ordered_pval = -log10(p.adjust)) %>%
+  slice_head(n = 10) %>%
+  ggplot(aes(x = fct_reorder(Description, ordered_pval), y = -log10(p.adjust)))+
+  geom_point(size = 3)+
+  coord_flip()+
+  labs(x = "", title = "KEGG")+
+  theme(legend.position = "none",
+        axis.text.y = element_text(face = "bold", color = "black"),
+        axis.text = element_text(face = "bold", color = "black"),
+        plot.title = element_text(face = "bold", hjust = 0.5, color = "black"))+
+    coord_flip()+
+  ylim(1,5)
+
+ggsave(filename = file.path(Figure_Export, "Overrepresentation_Analysis_Combined_KEGG_Fig2C.png"),
+       width = 8, height = 5)
+
+```
+
+

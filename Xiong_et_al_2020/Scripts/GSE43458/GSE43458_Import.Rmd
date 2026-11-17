@@ -1,0 +1,257 @@
+---
+title: "GSE43458_Import"
+output: html_document
+---
+
+
+#Activate the relevant R package libraries
+
+In order to import the GSE43458 dataset into R, there are two methods to do this. The raw data can either be downloaded as CEL files and imported directly into R or the GEOquery package can be used to streamline this. Both were used in this document because in order to get the proper annotation set, however only 1 of the methods data was used for the downstream analysis
+
+```{r}
+library(GEOquery)
+library(here)
+library(tidyverse)
+library(affy)
+library(affyio)
+library(R.utils)
+library(biomaRt)
+library(AnnotationDbi)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+
+#Import the Data from GSE43458 from GEOquery (Method 1)
+
+In this code chunk, the GSE43458 data is imported from the GEOquery package . However, it does not seem clear if the data imported is the raw data or the processed data that is already normalized. The authors of the paper note that they performed RMA normalization on the dataset, and the GEO dataset includes the processed data, but at least it appears unclear if the exprs() function drew from the matrix of raw data or already processed data.. Therefore, the data will be checked to see if it appears pre-normalized and the raw-data will be manually imported and downloaded for comparison.
+
+```{r}
+
+#Import the Data from NCBI GEO Omnibus
+GSE43458 <- getGEO("GSE43458", destdir = Data_Import, GSEMatrix = TRUE)
+
+#Extract Expression Matrix (The Microarray Counts)
+Matrix <- exprs(GSE43458[[1]])
+
+#Access Metadata
+Metadata <- GSE43458$GSE43458_series_matrix.txt.gz@phenoData@data
+#Alternatively, use Metadata <- pData(phenoData(GSE43458[[1]]))
+
+#Feature Data and then extract Gene Names (This appears to effectively be the GPL6244 platform matrix information which includes the probe to gene matching)
+Features <- GSE43458$GSE43458_series_matrix.txt.gz@featureData@data
+
+#Extract the Potential Probe ID to Gene Symbols
+Features <- Features %>%
+  mutate(Gene_Name = sub(".*//\\s*(.+?)\\s*//.*", "\\1", gene_assignment))
+
+###Lookup ProbeIDs using BIOmrt ---> May not work anymore since BIOmaRT has been discontinued (Update 11-8-26)
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL")
+mart <- useDataset("hsapiens_gene_ensembl", mart)
+annotLookup <- getBM(
+  mart = mart,
+  attributes = c(
+    "pd.hugene.1.0.st.v1",
+    "ensembl_gene_id",
+    "gene_biotype",
+    "external_gene_name"),
+  filter = "GPL6244",
+  values = Features$ID,
+  uniqueRows=TRUE)
+
+#Look at the Supplemental Files (If I wanted to download all of the raw data)
+getGEOSuppFiles("GSE43458")
+
+```
+
+
+#Import the Data from a direct GEO Download (Method 2)
+
+The alternative to using GEOquery is to download the raw data directly. This gives more control but requires more steps, however it is unclear how exactly the authors of Xiong et al 2020 imported the data and whether it was from a raw download or GEOquery. However, the raw data was downloaded directly from the NCBI GEO database and then the processing steps were performed. Although both methods were performed, only the data from the GEOquery will be used in the later downstream steps. However, this shows another way to get it. After RMA normalization, the actual normalized values are slightly different, but it likely is due to slight differences in the rma program that was used. The data is similar
+
+```{r}
+#This did not work, but if you go to the url used in the below chunk, you can download the CEL files that are zipped
+#download.file(url = "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE43458", destfile = file.path(here(),"Data"))
+
+library(oligo)
+
+#Create path for the CEL files to go
+
+tar <- file.path(Data_Import,"GSE43458_RAW.tar")
+CELpath <- file.path(Data_Import,"GSE43458_RAW_Data")
+
+#Create a directory if it does not exist
+if(file.exists(CELpath) == FALSE) {
+  
+  dir.create(CELpath)
+}
+
+#Untar the files to remove the .gz before we can import the data. Only needs to be run once.
+untar(tar, exdir = CELpath)
+
+#Raw Data Import
+
+files <- list.files(path = CELpath, full.names = TRUE)
+
+#Creates a list of all of the CEL files that I want to import and their full names
+f <- list.files(path = CELpath, pattern = "CEL.gz", full.names = TRUE)
+
+#Read all the Affymatrix files into an object (I tried using the affy package at first, but I got a warning that the oligo package is better for importing this type of data
+AffyObject <- read.celfiles(f)
+
+#Look at the distribution of the data prior to any normalization to make sure that this raw data wasn't already normalized (which it should not be)
+matrix_affy <- exprs(AffyObject)
+
+matrix_affy <- matrix_affy %>%
+  as.data.frame()
+
+matrix_affy %>%
+  pivot_longer(data=., cols = 1:110, names_to = "Samples", values_to = "Counts") %>%
+  ggplot(aes(x = Samples, y = Counts))+
+  geom_boxplot()
+
+#Since that data doesn't look very normally distributed, the RMA analysis will be performed. The quantile normalization will be performed beforehand.
+RMA_OBJECT <- normalize(AffyObject, method='quantile', which='pm')
+
+#Now that it is in the Quantile format, it can have rma run on it
+
+RMA_OBJECT <- rma(RMA_OBJECT)
+
+#Extract the RMA normalized Data and observe the distribution again.
+matrix_affy <- exprs(RMA_OBJECT)
+
+matrix_affy <- matrix_affy %>%
+  as.data.frame()
+
+matrix_affy %>%
+  pivot_longer(data=., cols = 1:110, names_to = "Samples", values_to = "Counts") %>%
+  ggplot(aes(x = Samples, y = Counts))+
+  geom_boxplot()
+
+```
+
+#Extract Annotations from the raw data
+
+Unfortunately, the GEOquery or even the raw data downloaded does not a file attached with a clear annotation file for Probe ID to Gene Symbol matching. There is the Feature Data where Gene names can be extracted out, but there are many missing probe IDs. Consequently, another method was found to identify the Probe ID to Gene Symbol match. However, it appears that to identify the annotation set without googling (where I can get the full information) is import the raw CEL.files and use the annotation() package to identify it for the GPL6244 platform
+
+```{r}
+#Extract features and the Probe ID to GENE NAME CONVERSION. There are multiple ways to do this, but I will try this way.
+
+#Step 1: Identify the annotation set
+annotation(AffyObject)
+
+#Step 2: Download the package for the annotation set (The 2nd one in this case) for the GPL6244 platform. Other datasets might use a different platform, and the right package for the right platform will need to be downloaded.
+
+library(pd.hugene.1.0.st.v1)
+library(hugene10sttranscriptcluster.db)
+
+Probe_ids <- as.character(Features$ID)
+
+#Step 2: Extract the actual features
+feature_affy <- AnnotationDbi::select(hugene10sttranscriptcluster.db, keys = Probe_ids, c("SYMBOL","ENTREZID","GENENAME"),keytype="PROBEID")
+feature_affy$PROBEID <- as.integer(feature_affy$PROBEID) 
+
+#Step 3: Its good, but I want to add it to the other set that I got from FeatureData from GEOquery to see if they match
+Features <- Features %>%
+  left_join(., feature_affy, by = c("ID" = "PROBEID"))
+
+#For Cases where the Features identified from this library conflicts with another from the AnnotationDBI selection, the gene name from the AnnotationDBI set was used.
+```
+
+
+#Look at distribution of the Data
+
+The data imported from GEOquery which is the data that will be used for downstream analysis needs to be checked to see if it needs normalization or if the data imported was already processed.
+
+```{r}
+Matrix <- Matrix %>%
+  as.data.frame()
+
+#Check to see if the data is normalized. If it is normalized, the medians and distribution should be roughly the same between all the samples (which is true)
+#Additionally, the paper that generated this data, said that they deposited the raw data and that it was normalized with RMA so I should be fine.
+
+# https://aacrjournals.org/clincancerres/article/19/13/3383/208367/ETS2-Mediated-Tumor-Suppressive-Function-and-MET
+
+Matrix %>%
+  pivot_longer(data=., cols = 1:110, names_to = "Samples", values_to = "Counts") %>%
+  ggplot(aes(x = Samples, y = Counts))+
+  geom_boxplot()
+
+#The data appears to be normalized with the medians approximately for each sample the same value.
+```
+
+#Rename the Probe IDs to Gene Names along with other pre-cleaning data steps
+
+Now with the new Probe ID to Gene Name annotation set identified, the sets can be merged for later down stream analysis.
+
+```{r}
+#Check if the Probe IDs from the set are the same as the rownames in the matrix
+identical(rownames(Matrix), Features$ID)
+
+#Check for duplicates
+
+sum(duplicated(rownames(Matrix)))
+
+sum(duplicated(Features$ID))
+
+#Remove duplicates
+
+Not_Remove <- !duplicated(Features$ID)
+
+Features <- Features[Not_Remove, ]
+
+#Filter any rows that are in Matrix but not in the Features Probes
+keep <- rownames(Matrix) %in% Features$ID
+sum(keep)
+Matrix <- Matrix[keep, ]
+
+#Filter the annotation set for any row not in the matrix
+keep <- Features$ID %in% rownames(Matrix)
+sum(keep)
+Features <- Features[keep, ]
+
+#Try to match the Matrix rownames and Features$ID
+index_match <- match(rownames(Matrix), Features$ID)
+
+#Make sure to coerce them into the same character type or the matching won't work
+Features$ID <- as.character(Features$ID)
+
+Features <- Features[index_match, ]
+
+#Check if they are identical now
+identical(rownames(Matrix), Features$ID)
+
+#Now that they are matched and aligned, I will remove any rows where we don't seem to have a probe matched to a gene. The alternative could be to try to find another method to match the probe IDs to a gene name
+
+Rows_with_Genes <- is.na(Features$SYMBOL) == FALSE
+
+Matrix <- Matrix[Rows_with_Genes,]
+Features <- Features[Rows_with_Genes,]
+
+#Add the Symbol column from Features to the Matrix
+Matrix$Symbol <- Features$SYMBOL
+
+#Group by each Gene symbol. I could select the max, mean, median, sum etc. What I typically do is look at the duplicates to see what it is. Very often, the duplicates are multiple duplicates with few counts across the board, but in this case, it looks like each count is roughly each to each other. Therefore, I am going to take the median or mean.
+
+#Take a look at the Symbols with more than one
+Matrix %>%
+  group_by(Symbol) %>%
+  filter(n() > 1)
+
+#Group by Symbol and then take the mean count for each gene for each sample.
+Matrix <- Matrix %>%
+  group_by(Symbol) %>%
+  summarise(across(where(is.numeric), mean))
+```
+
+#Export the Data
+
+```{r}
+saveRDS(object = Matrix, file = file.path(Data_Import, "GSE43458_Processed_Data.rds"))
+saveRDS(object = Metadata, file = file.path(Data_Import, "GSE43458_Metadata.rds"))
+```
+

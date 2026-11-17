@@ -1,0 +1,661 @@
+---
+title: "Coxph_survival_curve_PFS"
+output: html_document
+---
+
+
+#Step 1: Import Packages, Set Pathways for Data, and Import the Upregulated and Downregulated Genes
+
+The data along with the vectors of the upregulated and downregulated genes, along with the genes that were found to be indicative/predictive of Tumor Growth, Lymph Invasion, and Metastasis of the LUAD cancer were imported. The Raw counts from the TCGA LUAD Matrix was transformed and converted into VST (Variance Stabilized Transformation). In Xiong et al 2020,
+they do not explain whether Z score or another parameter was used for the cox proportional hazard models, so the variance stabilized transformation on the matrix was used for survival analysis.
+
+```{r}
+library(performance)
+library(tidyverse)
+library(here)
+library(broom)
+library(survival)
+library(survminer)
+library(pheatmap)
+library(DESeq2)
+library(gtsummary)
+library(patchwork)
+
+#File Pathways
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+#Import txt files of Upregulated and Downregulated Genes
+
+Upregulated_Genes <- read.delim(file = file.path(Data_Import,"Upregulated_Genes.txt"), header = FALSE)
+
+Downregulated_Genes <- read.delim(file = file.path(Data_Import,"Downregulated_Genes.txt"), header = FALSE)
+
+#Vector of all the Genes
+All_Genes <- c(Upregulated_Genes, Downregulated_Genes)
+
+All_Genes <- unlist(All_Genes)
+
+#Import list of genes for each metric of interest that alone have a statistically significant impact on that metric (Tumor Growth, Lymph Invasion, etc)
+
+TumorGrowthRiskGenes <- read.delim(file = file.path(Data_Import, "TumorGrowthRisk_Genes_Univariate_Model.txt"))
+
+LymphInvasionGenes <- read.delim(file = file.path(Data_Import, "LymphGenes_Univariate_Model.txt"))
+
+MetastasisGenes <- read.delim(file = file.path(Data_Import, "MetastasisGenes_Univariate_Model.txt"))
+
+
+#Import ColData
+LUAD_ColData <- readRDS(file = file.path(Data_Import,"LUAD_Coldata.rds"))
+
+#Import the Raw Counts and use DESeq2 to run variance stabilization on the counts
+
+LUAD_matrix <- readRDS(file = file.path(Data_Import, "LUAD_counts.rds"))
+
+#Checking to ensure they are true
+identical(LUAD_ColData$barcode, colnames(LUAD_matrix))
+
+#Run the Variance Stabilized Transformation and save the values in the object "VST_Expression_Values"
+
+VST_Expression_Values <- DESeqDataSetFromMatrix(countData = LUAD_matrix,
+                                     colData = LUAD_ColData,
+                                     design = ~ definition)
+
+VST_Expression_Values <- vst(VST_Expression_Values, blind = TRUE)
+
+VST_Expression_Values <- as.data.frame(assay(VST_Expression_Values))
+
+#saveRDS(VST_Values, file = file.path(Data_Import, "VST_transformed_values.rds"))
+
+#Import Clinical Data
+
+LUAD_CLINICAL_DATA <- readRDS(file = file.path(Data_Import,"LUAD_Clinicaldata.rds"))
+
+LUAD_CLINICAL_DATA <- LUAD_CLINICAL_DATA %>%
+  dplyr::select(submitter_id, days_to_last_follow_up, days_to_death, vital_status)
+```
+
+
+#Step 2: Join the VST stabilized values Data and the Clinical Data
+
+The VST stabilized data needs to be joined with the clinical data for downstream analysises in the Cox Proportional Hazard Model as well as other analysises can be performed.
+
+```{r}
+#Transposes data and forms new dataframe
+VST_Expression_Values <- VST_Expression_Values %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(., var = "barcode") 
+
+VST_Expression_Values <- VST_Expression_Values %>%
+  mutate(patient_id = str_extract(barcode, ".{12}")) #Extracts the first 12 characters
+
+#pivot longer
+VST_Expression_Values <- VST_Expression_Values %>%
+  pivot_longer(cols = -c(barcode, patient_id), names_to = "Gene", values_to = "VST_Values")
+
+#Add clinical data and add whether the gene is high or low expression
+VST_Values_grouped <- VST_Expression_Values %>%
+  group_by(Gene) %>%
+  mutate(Expression_Level = if_else(VST_Values > median(VST_Values), "High","Low")) %>%
+  left_join(., LUAD_CLINICAL_DATA, by = c("patient_id" = "submitter_id"))
+
+#Calculate variables needed for survival analysis. Here is where it is noted that 0 is the value for being alive, and 1 is for being dead
+Survival_matrix <- VST_Values_grouped  %>%
+  mutate(time_in_months = days_to_last_follow_up / 30.41,
+         deceased = if_else(vital_status == "Alive", 0, 1))
+
+```
+
+
+
+
+#Step 3: Run Repeated Univariate Analysis for each gene to identify whcih genes alone are potential predictors for survival.
+
+To be consistent with what was done in Xiong et al 2020, they took all the upregulated and downregulated genes and ran a univariate Cox proportional hazard model and identified all the genes that along have a statistically significant impact on patient survival (either positive or negatively). This was down using two different functions where one looks at the Kaplan Meier Curve with the Log-rank test between high and low expression groups, while the other looks at the cox proportional hazard model. The results are similar, but not exactly the same, which demonstrates how the exact statistical method and what is being compared does impact the results.
+
+```{r}
+
+#3.1 Identify all the Upregulated and Downregulated Genes
+covariate_genes <- c(Upregulated_Genes$V1, Downregulated_Genes$V1)
+
+#3.2 Filter for genes that are known to be upregulated and downregulated
+Survival_matrix <- Survival_matrix %>%
+  filter(Gene %in% covariate_genes) %>% dplyr::select(-Expression_Level) %>%
+  pivot_wider(data=., names_from = "Gene", values_from = "VST_Values")
+
+
+##3.3  Run Univariate Scan or the Kaplan Meier Curve quickscan
+
+#Quickly screen the univariate results
+univariate_quickscan <- function(covariates_of_interest = NA,
+                                 cox_formula = "Surv(time_in_months, deceased)",
+                                 data_input = data){
+
+#Run lapply for each covariate to quickly run the cox model for each covariate. The alternative is to do a regular for loop with indexing, but this is in theory a faster mechanism
+results <- lapply(covariates_of_interest, function(covariate){
+  
+  #Prepare Cox Formula 
+  
+  used_formula <- reformulate(termlabels = covariate, response = cox_formula)
+  
+  #Run Formula
+  model_cox <- coxph(formula = used_formula, data = data_input)
+  
+  model_summary <- summary(model_cox)
+  
+  #Attach Data as a combined list for each iteration of the covariate
+  c(
+  Covariate <- as.character(covariate),
+  HR    <- signif(model_summary$coefficients[2], 2),
+  lower <- signif(model_summary$conf.int[, "lower .95"], 2),
+  upper <- signif(model_summary$conf.int[, "upper .95"], 2),
+  HR   <- signif(model_summary$wald["pvalue"], 2)
+  )
+})
+
+
+combined_data <- as.data.frame(do.call(rbind, results)) #This function takes all the items that were saved to results as a list (from sapply) and convertes them to a dataframe
+
+colnames(combined_data) <- c("Covariate","HR","Lower","Upper","pvalue")
+
+return(combined_data)
+
+}
+
+#Kaplan Meier Curve quickscan 
+Repeated_Kaplan_Meier_Curve <- function(fulldata = data,
+                                        predictor_variable = "Expression_Level",
+                                        time = "time_in_months",
+                                        outcome = "deceased",
+                                        group_metric = "symbol",
+                                        units_of_time = "months"){
+  
+  #Extract the variables
+  predictor_metric <- fulldata[[predictor_variable]]
+  time_metric <- fulldata[[time]]
+  outcome_metric <- fulldata[[outcome]]
+  group_metric <- fulldata[[group_metric]]
+  
+  
+  Combined_Dataset <- data.frame(predictor_metric = predictor_metric,
+                                 time_metric = time_metric,
+                                 outcome_metric = outcome_metric,
+                                 group_metric = group_metric)
+  
+  ##Choose the names of the columns for the analysis
+  names <-  Combined_Dataset %>% 
+    survfit(Surv(time_metric, outcome_metric) ~ predictor_metric, data = .) %>%
+    surv_median(fit = .)
+  
+  #Run a loop to calculate the median survival for each group + p value
+  
+  Symbols <- unique(Combined_Dataset$group_metric) 
+  
+  #Create an Empty Dataframe and preallocate the length
+  Pvaluegraph <- data.frame(matrix(ncol = 4, nrow = length(Symbols)))
+  # Pvaluegraph <- matrix(ncol = 4, nrow = length(Symbols))
+  
+  #Run a loop to calculate the median survival for each group + p value
+  
+  
+  for(i in 1:length(Symbols)){
+    
+    Gene <- Symbols[i]
+    
+    filtered_data <- Combined_Dataset %>% filter(group_metric == Gene)
+    
+    fit <- survfit(Surv(time_metric, outcome_metric) ~ predictor_metric, data = filtered_data)
+    
+    median <- surv_median(fit, combine = TRUE)
+    
+    pval <- survdiff(Surv(time_metric, outcome_metric) ~ predictor_metric, data = filtered_data)$pval
+    
+    new_data <- c(Gene, as.numeric(round(median[1,2],2)), as.numeric(round(median[1,3],2)), pval)
+    
+    Pvaluegraph[i,] <- new_data
+    
+  }
+  #Return the combined dataframe after renaming the column
+  
+  colnames(Pvaluegraph) <- c("symbol", as.character(paste("Median survival in",units_of_time, "of", names[1,1])), 
+                             as.character(paste("Median survival in",units_of_time, "of",names[2,1])), "p_value")
+  
+  return(Pvaluegraph)   
+}
+
+```
+
+
+Run the 3 different variations to identify. Prior to creating a cox proporitional model in Xiong et al 2020, they performed repeated Log-rank tests to determine which genes alone have a statistically significant survival difference bigh and low expression groups. Therefore, although the univariate_quickscan function runs repeated univariate coxph models, the data collected
+from the repeated Kaplan Meier Curve and associated log rank test between high and low expression will be used for downstream analysis.
+
+```{r}
+###3.4 Run Cox quickscan on the covariates for the dataset that are statistically significant in a cox proportional hazard model
+
+coxph_quickscan <- univariate_quickscan(covariates_of_interest = covariate_genes,
+                                        cox_formula = "Surv(time_in_months, deceased)",
+                                           data_input = Survival_matrix)
+
+#Only about 11 genes, after adjusting for multiple testing, is statistically significant
+coxph_quickscan <- coxph_quickscan %>%
+  mutate(p_adjust = p.adjust(pvalue, method = "BH")) %>% #  %>%  filter(p_adjust < 0.05)
+  filter(p_adjust < 0.05)
+
+
+
+#3.5 Test if we get the same results by converting all of the points into a high or low expression for each gene. It turns out there is a lot of overlap, but there are a couple differences when comparing between high and low expression groups using a log rank test rather than using the Cox proportional hazard model.
+
+cox_quickscan_highlow <- Survival_matrix %>%
+  mutate(across(all_of(covariate_genes), ~ if_else(.x > mean(.x), "High", "Low"))) %>%
+  univariate_quickscan(covariates_of_interest = covariate_genes,
+                       cox_formula = "Surv(time_in_months, deceased)",
+                                           data_input = .) %>%
+  mutate(p_adjust = p.adjust(pvalue, method = "BH")) %>% # filter(p_adjust < 0.05)
+  filter(p_adjust < 0.05)
+
+
+#3.6 Test running using the Kaplan Meier / Log Rank Test test between the high and low survival groups
+
+kaplan_meier_quickscan <- Survival_matrix %>%
+  mutate(across(all_of(covariate_genes), ~ if_else(.x > mean(.x), "High", "Low"))) %>%
+  pivot_longer(data=., cols = c(covariate_genes), names_to = "Genes", values_to = "Expression_Level") %>%
+  Repeated_Kaplan_Meier_Curve(fulldata =.,
+                              predictor_variable = "Expression_Level",
+                              time = "time_in_months",
+                              group_metric = "Genes",
+                              outcome = "deceased",
+                              units_of_time = "months") %>%
+  mutate(p_adjust = p.adjust(p_value, method = "BH")) %>%
+  filter(p_adjust < 0.05)
+
+
+```
+
+
+Consistent with Xiong et al 2020, after performing a correction for many comparisons, all the differentially expressed genes which were shown to have differences between high and low expression for patient survival were included in the downstream analysis to create a cox proportional hazard model.
+
+```{r}
+
+#3.8 Make a plot of the grouped survival curves for the genes
+
+grouped_fit_data <- Survival_matrix %>% 
+  dplyr::select(barcode, time_in_months, deceased, kaplan_meier_quickscan$symbol) %>%
+  pivot_longer(data=., cols = -c(barcode, time_in_months, deceased), names_to = "Gene", values_to = "VST_Count")
+
+grouped_fit <- survfit(Surv(time_in_months, deceased) ~ Gene, data = grouped_fit_data)
+
+#Does not work
+#ggsurvplot_group_by(fit = grouped_fit, data = grouped_fit_data, group.by = "Gene")
+#Does not work either
+#ggsurvplot_facet(fit = grouped_fit, data = grouped_fit_data, facet.by = "Gene", palette = "jco")
+
+#3.7: My custom function to look at the survival curves. This plot will explicitly show the individual survival curves (not adjusted) for each of the covariates of interest, in this case genes, that were previously shown by the coxph_quickscan to have a statistically significant impact on survival dependent on their expression level.
+
+#Custom Function
+ggsurvplot_facet_custom <- function(data, group_by = "Group", time = "time", survival_status = "status", metric = "metric"){
+  
+  #Get the length of the number of unique observations in "Group"
+  unique <- unique(data[[group_by]])
+  
+  
+  
+  #Get a list that will contain each of the unique fits
+  plot_list <- vector("list", length = length(unique))
+  
+  data2 <- data %>% nest(., .by = group_by)
+  
+  
+  
+  for(i in 1:length(plot_list)){
+    
+    current_data <- data2[[2]][[i]]
+    
+    
+    name <- data2[[1]][[i]]
+    
+    #Extract the specific columns to run the Survival Analysis into current_data
+    
+    time1 <- current_data[[time]]
+    status1 <- current_data[[survival_status]]
+    metric1 <- current_data[[metric]]
+    
+    current_data <- data.frame(time = time1, status = status1, metric = metric1)
+    #Create a fit
+    fit_now <- survfit(Surv(time, status) ~ metric, data = current_data)
+    
+    #Generate the plot
+    plot <- ggsurvplot(fit = fit_now,
+                       data = current_data,
+                       pval = TRUE,
+                       fun = "pct",
+                       title = name)
+    
+    #Extract # of patients in each group
+    strata_count <- plot$data.survtable
+    
+    Strata_count <- strata_count %>% filter(pct.risk == 100)
+    High_N <- Strata_count[1,"n.risk"]
+    Low_N <- Strata_count[2,"n.risk"]
+    
+    #Add the plot to the longer list
+    plot_list[[i]] <- plot$plot +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5))+
+      theme(legend.position = c(0.9,0.9),
+            legend.background = element_blank())+
+      scale_color_manual(values = c("metric=High" = "red", "metric=Low" = "black"),
+                         labels = c(paste0("High (N=",High_N,")"), paste0("Low (N=",Low_N,")")))
+  }
+  
+  #Wrap the plots together
+  FINALPLOT <- wrap_plots(plot_list)
+  
+  FINALPLOT
+}
+
+```
+
+```{r}
+#3.8: Convert the grouped fit data even further b
+
+grouped_fit_data <- grouped_fit_data %>%
+  filter(Gene %in% kaplan_meier_quickscan$symbol) %>%
+  group_by(Gene) %>%
+  mutate(Expression_Level = if_else(VST_Count > median(VST_Count), "High","Low")) %>%
+  ungroup()
+
+
+ ggsurvplot_facet_custom(data = grouped_fit_data,
+                        group_by = "Gene", time = "time_in_months", survival_status = "deceased", metric = "Expression_Level")
+
+#Save the Graph from the custom plot
+ ggsave(filename = file.path(Figure_Export,"Statistically_Significant_Genes_On_Survival.png"),
+       width = 22,
+       height = 12, units = "in")
+
+#Observation of just the survival plot of ASPM alone
+grouped_fit_data %>%
+  filter(Gene == "ASPM") %>%
+  ggsurvplot(data=., 
+             fit = survfit(Surv(time_in_months, deceased) ~ Expression_Level, data = .))
+
+
+```
+
+
+#Step 4: Look for Correlations between Genes 
+
+The next step is to look for any correlations between genes that were shown to have a statistically significant impact on patient survival from the univariate scanning from the Cox Proportional Hazard Model.
+
+```{r}
+
+#### Function to look at correlation between these Genes
+
+Correlation_Plots <- function(Base_Gene = NULL,
+                              Comparison_Genes = NULL,
+                              Dataset = NULL,
+                              new_row = 2){
+  
+wrapped_plots <- vector("list", length = length(Comparison_Genes))
+
+#For loop that make a pearson correlation plot for each gene
+for (i in 1:length(wrapped_plots)){
+  
+  Symbol <- Comparison_Genes[[i]]
+  
+  cor_formula <- reformulate(termlabels = Base_Gene,response = Symbol)
+  
+  #Get the P value value from a linear regression
+  model <- lm(data = Dataset, formula = cor_formula)
+  model_tidy <- tidy(model)
+  
+  rounded_pval <- model_tidy[["p.value"]][2]
+  rounded_pval <- if_else(rounded_pval < 0.01, "<0.01", ">0.01")
+  
+  #Get the R Correlation Coefficient
+  cor_value <- with(data = Dataset, cor(x = Dataset[,Base_Gene], y = Dataset[, Symbol], method = "pearson"))
+  cor_value <- round(cor_value, digit = 2)
+  
+  #Get plot
+  plot <- ggplot(data = Dataset, aes(x = .data[[Base_Gene]], y = .data[[Symbol]])) +
+    geom_point(color = "blue")+
+    geom_smooth(method = lm, color = "red")+
+    theme_classic()+
+    labs(x = paste(Base_Gene, "Expression"),
+         y = paste(Symbol,"Expression"))+
+    labs(caption = paste("R=",cor_value, ";P", rounded_pval))
+  
+  #Add plot to list
+  wrapped_plots[[i]] <- plot
+  
+}
+
+#Wrap the plots together
+wrapped_plots <- wrap_plots(wrapped_plots, nrow = new_row)
+
+return(wrapped_plots)
+
+}
+#####
+```
+
+```{r}
+
+#Run the function to obtain the correlation plots
+
+Univariate_scanned_correlation_plots <- Correlation_Plots(Base_Gene = "MELK",
+                                                          Comparison_Genes = kaplan_meier_quickscan$symbol,
+                                                          Dataset = Survival_matrix,
+                                                          new_row = 2)
+
+##Correlation_Matrix
+
+Survival_matrix %>%
+  dplyr::select(kaplan_meier_quickscan$symbol) %>%
+  rstatix::cor_mat() %>%
+  pivot_longer(data=., cols = -(rowname), names_to = "Gene", values_to = "Coefficient") %>%
+  ggplot(aes(x=rowname, y = Gene, fill = Coefficient))+
+  geom_tile()+
+  labs(x = "Gene 1", y = "Gene 2")+
+  theme(axis.text.x=element_text(angle = -45, hjust = 0))+
+  scale_fill_gradient2(high = "#E7522A", low ="#347372", mid = "white")
+
+Survival_matrix %>%
+  dplyr::select(kaplan_meier_quickscan$symbol) %>%
+  cor() %>%
+  corrplot::corrplot()
+
+ggsave(filename = file.path(Figure_Export, "Figure_4a_Correlation_of_Genes.png"))
+  
+```
+
+
+#Create a master coxph model with all the variates that are independently statistically significant
+
+```{r}
+
+#Make Master Formula
+master_formula <- reformulate(termlabels = kaplan_meier_quickscan$symbol, response = "Surv(time_in_months, deceased)")
+
+#Run Master Model
+master_model <- coxph(formula = master_formula, data = Survival_matrix)
+
+summary(master_model)
+
+master_model %>%
+  tbl_regression(exponentiate = T)
+
+#In the current master model, only 1 of the 11 genes is a statistically significant predictor, and it is a harmful gene
+```
+
+#Model Selection
+
+In Xiong et al 2020, they choose to do backwards stepwise regression to identify the preferred model. However, other references state that this is doable, but that there are better methods for model selection on survival. Nevertheless, in order to try to reproduce what was shown in Xiong et al 2020, it will be done according to the backwards step regression. It turns out there is a nice clean function that does this then the trick one that I used.
+
+```{r}
+library(MASS)
+
+#Backwards Regression Model
+step_model <- stepAIC(master_model, direction = "backward", trace = FALSE)
+
+#Look at Model specifics
+step_model %>%
+  tbl_regression(exponentiate = T)
+
+#Convert the Coxph model into a survfit model and extract the summary where the time value is closest to either 12 months or 60 months
+step_model_summary <- survfit(step_model) %>%
+  surv_summary() %>% 
+  mutate(time = round(time, digits = 2),
+         surv = round(surv, digits = 2)) %>%
+  filter((abs(time - 12) == min(abs(time - 12))) |
+           (abs(time - 60) == min(abs(time - 60))))
+
+
+#Overall Survival Curve with the master model that has been STEPAIC adjusted
+step_model %>%
+  survfit() %>%
+  surv_summary() %>%
+  ggsurvplot_df(fit = ., fun = "pct", palette = "jco", conf.int = TRUE )+
+ # ggadjustedcurves(fit = ., data = Survival_matrix, fun = "pct", palette = "jco", conf.int = TRUE)+
+  labs(x = "time in months", y = "Survival Rate", title = "Stepwise Adjusted Coxph Model Survival Curve for LUAD")+
+  scale_y_continuous(breaks = c(0,20,40,60,80,100), labels = c("0%","20%","40%","60%","80%","100%"))+
+  geom_vline(xintercept = 12, linetype = "dashed", color = "darkblue")+ #Line for 1 year survival
+  annotate("text", x = 12 + 25, y = 95, label = paste0("1 year survival: \n",100*step_model_summary[1,5],"%"), color = "darkblue", size = 3.75)+
+  geom_vline(xintercept = 60, linetype = "dashed", color = "tomato4")+ #Line for 5 year survival time
+  annotate("text", x = 60 + 30, y = 95, label = paste0("5 year survival: \n",100*step_model_summary[2,5],"%"), color = "tomato4", size = 3.75)+
+  theme(legend.position = "right",
+        plot.title = element_text(face = "bold", hjust = 0.5))
+#  geom_ribbon(inherit.aes = FALSE, aes(x = step_model_summary$time, y = step_model_summary$surv, ymin = step_model_summary_ribbon$lower, ymax = 
+#  step_model_summary_ribbon$upper), color = "blue", alpha = 0.2)
+
+ggsave(filename = file.path(Figure_Export, "Cox_Prop_Model_StepAdjusted_SurvivalCurve_Fig4D.png"))
+  
+#Interestingly enough, this automated function from the MASS package gives 3/4 of the same genes (ECT2, TCN1,TOP2A, TPX2) than the homemade function I made that does the same thing. I have no doubt that this function is better for broad scale analysis though. Nevertheless, this shows that what I in the other Cox_ph .rmd file is very similar with 3/4 remaining genes. Part of the difference is that here this function is trying to find the lowest AIC model and select that one, while a less preferred option was done in the other chat where genes were removed until all the remaining ones were statistically significant.
+
+
+#Graph that is reproduced
+step_model %>%
+  tidy() %>%
+  mutate(group = if_else(estimate > 0, "Dangerous Factor", "Protective Factor")) %>%
+  ggplot(aes(x = estimate, y = -log10(p.value), color = group))+
+  geom_point()+
+  geom_hline(yintercept = -log10(0.05), color = "black", linetype = "dashed")+
+  ylim(0,5)+
+  xlim(-1,1)+
+  labs(x = "coeff")+
+  geom_text(aes(label = term),color = "black", nudge_y = 0.25)+
+  theme_classic()
+
+
+ggsave(filename = file.path(Figure_Export, "Coeffs_of_genes_of_OptimizedCoxPropModel_Fig4B.png"))
+
+#Look at the Schoenfeld Residuals for the Plot 
+cox.zph(step_model)
+
+ggcoxzph(cox.zph(step_model))
+
+ggsave(filename = file.path(Figure_Export, "Residual_Hazard_Plots_4C.png"))
+
+#Predicted 1 Year Summary Graph compared to the actual results
+
+#To get the Predicted vs Actual Summary, I will pull from the initial surv_summary() identified previously and it will be compared to the results of the overall actual survival summary  and isolate the 1 year and 5 year survival times.
+
+Actual_Survival_Summary <- Survival_matrix %>% 
+  dplyr::select(-patient_id, -days_to_death, -vital_status, -days_to_last_follow_up,) %>%
+  survfit(Surv(time_in_months, deceased) ~ 1, data = .)  %>% surv_summary() %>% mutate(time = round(time, digits = 2),
+         surv = round(surv, digits = 2)) 
+
+#Bind The columns of the Actual Survival Data and the Predicted
+
+Actual_Survival_Summary <- Actual_Survival_Summary %>%
+  dplyr::select(Actual_Surv = surv, Actual_Upper = upper, Actual_Lower = lower, time_actual = time) %>%
+  bind_cols(., survfit(step_model) %>% surv_summary())
+
+
+#Rename the combined dataframe 
+  Actual_Survival_Summary <- Actual_Survival_Summary %>%
+  dplyr::select(time_actual, Actual_Surv, Actual_Upper, Actual_Lower, surv, upper, lower) %>%
+  filter((abs(time_actual - 12) == min(abs(time_actual - 12))) |
+           (abs(time_actual - 60) == min(abs(time_actual - 60)))) %>%
+    pivot_longer(data=., cols = c(Actual_Surv, surv), names_to = "Category", values_to = "Type") %>%
+    mutate(Actual_Upper = if_else(Category == "surv", upper, Actual_Upper),
+           Actual_Lower = if_else(Category == "surv", lower, Actual_Lower))
+  
+  #Make Bar Graph comparing the Predicted vs Actual Survival at 12 and 60 months (No Figure made)
+  Actual_Survival_Summary %>%
+    mutate(time_actual = as.character(time_actual)) %>%
+    ggplot(aes(x = time_actual, y = Type, fill = Category))+
+    geom_col(position = position_dodge(width = 0.9))+
+    geom_errorbar(aes(ymin = Actual_Lower, ymax = Actual_Upper),
+                  position = position_dodge(width = 0.9), width = 0.1)+
+    scale_y_continuous(limits = c(0,1),
+                       breaks = c(0,0.2,0.4,0.6,0.8,1.0),
+                       labels = c("0%","20%","40%","60%","80%","100%"))+
+    scale_x_discrete(labels = c("12", "60"))+
+    theme_classic()+
+    scale_fill_brewer(palette = "Pastel1")+
+    labs(x = "months since diagnosis",
+         y = "Percent Survival",
+         title = "Actual Survival vs Predicted Survival at 1 year and 5 year from \n
+         Optimized Cox proportional hazard model")
+
+ ggsave(filename = file.path(Figure_Export, "")) 
+
+ 
+ #Create Dataframe for Actual vs Predicted 1 year and 5 year survival curve
+ 
+ Actual_Full_Summary <- Survival_matrix %>% 
+  dplyr::select(-patient_id, -days_to_death, -vital_status, -days_to_last_follow_up,) %>%
+  survfit(Surv(time_in_months, deceased) ~ 1, data = .)  %>% surv_summary() %>% 
+  dplyr::select(Actual_Surv = surv, Actual_Upper = upper, Actual_Lower = lower, time_actual = time) %>%
+  left_join(., survfit(step_model) %>% surv_summary() %>% dplyr::select(surv, upper, lower, time), by = c("time_actual" = "time")) 
+ 
+ #Graph the 5 year plot
+
+ Actual_Full_Summary %>%
+   filter((abs(surv - 0.4) == min(abs(surv - 0.4))) |
+           (abs(surv - 0.55) == min(abs(surv - 0.55))) | 
+            (abs(surv - 0.7) == min(abs(surv - 0.7))) ) %>%
+   ggplot(aes(x = surv, y = Actual_Surv))+
+   geom_line()+
+   geom_point(shape = 9)+
+   #geom_ribbon(aes(ymin= lower, ymax = upper), fill = "skyblue", alpha = 0.5)
+   geom_errorbar(aes(ymin= lower, ymax = upper), width = 0.015)+
+   scale_x_continuous(limits = c(0.35, 0.75),
+                      breaks = seq(from = 0.35, to = 0.75, by = 0.05))+
+   ylim(0.2, 0.8)+
+   labs(x = "Predicted 5 Year Survival",
+        y = "Actual 5 Year Survival",
+        title = "5 Year Survival Rates (Predicted vs Actual)")+
+   #geom_line(aes(x = Actual_Surv, y = Actual_Surv ), inherit.aes = F, color = "navyblue")+ #Actual Survival
+   theme_classic()+
+   theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+ 
+ ggsave(filename = file.path(Figure_Export, "5_year_survival_plot_Predicted_vs_Actual_4G.png"))
+ 
+ #Graph the 1 year plot
+ 
+  Actual_Full_Summary %>%
+   filter((abs(surv - 0.8) == min(abs(surv - 0.8))) |
+           (abs(surv - 0.9) == min(abs(surv - 0.9))) | 
+            (abs(surv - 0.95) == min(abs(surv - 0.95))) ) %>%
+   ggplot(aes(x = surv, y = Actual_Surv))+
+   geom_line()+
+   geom_point(shape = 9)+
+   #geom_ribbon(aes(ymin= lower, ymax = upper), fill = "skyblue", alpha = 0.5)
+   geom_errorbar(aes(ymin= lower, ymax = upper), width = 0.015)+
+   scale_x_continuous(limits = c(0.75, 1),
+                      breaks = seq(from = 0.75, to = 1.0, by = 0.05))+
+   ylim(0.75, 1.0)+
+   labs(x = "Predicted 5 Year Survival",
+        y = "Actual 5 Year Survival",
+        title = "1 Year Survival Rates (Predicted vs Actual)")+
+   #geom_line(aes(x = Actual_Surv, y = Actual_Surv ), inherit.aes = F, color = "navyblue")+ #Actual Survival
+   theme_classic()+
+   theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  ggsave(filename = file.path(Figure_Export, "1_year_survival_plot_Predicted_vs_Actual_4F.png"))
+
+```
+

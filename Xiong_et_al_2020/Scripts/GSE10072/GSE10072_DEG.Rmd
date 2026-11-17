@@ -1,0 +1,152 @@
+---
+title: "GSE10072_DEG"
+output: html_document
+---
+
+
+
+#Import Library 
+
+```{r}
+library(tidyverse)
+library(limma)
+library(factoextra)
+library(MASS)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+```
+
+
+#Import Metadata and Matrix Data
+
+```{r}
+#Access Metadata
+Metadata <- readRDS(file = file.path(Data_Import, "GSE10072_Metadata.rds"))
+
+#Extract specific columns of interest for PCA check
+Cols_of_Interest <- Metadata %>% dplyr::select(geo_accession, 
+                                               Tissue_Type = source_name_ch1,
+                                               Sex = characteristics_ch1,
+                                               Smoking_Status = characteristics_ch1.2,
+                                               Stage_of_Cancer = characteristics_ch1.3) %>%
+  mutate(Stage_and_Tissue_Type = paste(Tissue_Type,"_",Stage_of_Cancer))
+
+Matrix <- readRDS(file = file.path(Data_Import, "GSE10072_Processed_Data.rds"))
+```
+
+#Run a PCA to look for potential batch effects or other effects that may distort the analysis
+
+A PCA analysis will be run to look for and identify any potential batch effects or cofounders that might need to be checked. Although other checks can be done as well, the only one performed here is a PCA analysis.
+```{r}
+#Make PCA Matrix
+pca_matrix <- Matrix %>% t()
+
+#Again double check to make sure the sample names in the Matrix and the Metadata are in the same order
+identical(rownames(pca_matrix), Metadata$geo_accession)
+
+#Run PCA analysis
+PCA <- prcomp(x = pca_matrix, scale = FALSE) #No need for scaling since its already normalized via RMA
+
+#Look at PCA plots
+
+#Faceted by Sex
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$Sex,
+                label = "none")
+
+fviz_pca_ind(X = PCA)
+
+fviz_pca_var(X = PCA)
+
+#Faceted by Smoking Status
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$Smoking_Status,
+                label = "none")
+
+#Stage of the Tumor in the patient (even if the tissue is non-tumors). Each patient has a normal tissue and adenocarcinoma matched sample, so every normal tissue sample will have the status of the paired tumor.
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$Stage_and_Tissue_Type,
+                label = "none")
+
+#Faceted by Tissue Type (and we get results that make sense where normal and cancerous tissue have quite a bit different expression of genes)
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$Tissue_Type,
+                label = "none")
+
+ggsave(filename = file.path(Figure_Export, "PCA_GSE10072.png"))
+
+```
+
+#Run the Differential Gene Expression Analysis using Limma
+
+```{r}
+#Create a Factor where the reference level will be the normal lung tissue
+Cols_of_Interest <- Cols_of_Interest %>%
+  mutate(Tissue_Type = factor(Tissue_Type, levels = c("Normal Lung Tissue", "Adenocarcinoma of the Lung")))
+
+#Create a basic design for the limma() function to run
+Design <- model.matrix(~ 0 + Cols_of_Interest$Tissue_Type)
+
+#Choose Names that make sense to be the names of each column
+valid_names <- make.names(c("Normal Lung Tissue", "Adenocarcinoma of the Lung"))
+
+colnames(Design) <- valid_names
+
+#Run a Linear fit
+fit <- lmFit(object = Matrix, design = Design)
+
+#Although there is only one contrast in this example, choose the contrast that will be compared
+contrasts <- makeContrasts(Adenocarcinoma.of.the.Lung-Normal.Lung.Tissue, 
+                           levels = Design)
+
+#Re-run the linear fit based on the contrasts designed 
+fit_final <- contrasts.fit(fit, contrasts) 
+fit_final <- eBayes(fit_final)
+
+#Extract the results
+Lung_Tumor_vs_Normal_Tissue <- topTable(fit = fit_final, number = length(rownames(Matrix)), adjust.method = "BH")
+
+#Add Significance to the results
+
+Lung_Tumor_vs_Normal_Tissue <- Lung_Tumor_vs_Normal_Tissue %>%
+  mutate(Significance = case_when(
+    adj.P.Val < 0.05 & logFC > 1 ~ "Upregulated", #Fold Change of 2 or more
+    adj.P.Val < 0.05 & logFC < -1 ~ "Downregulated", #Fold Change of 0.5 or less
+    TRUE ~ "No Significance"
+  ))
+
+saveRDS(Lung_Tumor_vs_Normal_Tissue, file = file.path(Data_Import, "GSE10072_DEG_results.rds"))
+
+#Make a Table of significance results
+significance_table <- table(Lung_Tumor_vs_Normal_Tissue$Significance)
+
+#Make a Graph of the results to duplicate 1C from Xiong et al 2020
+
+Lung_Tumor_vs_Normal_Tissue %>%
+ggplot(aes(x=logFC, y = -log10(adj.P.Val)))+
+  geom_point(aes(color = Significance))+
+  geom_vline(xintercept = 1, linetype = "dashed")+
+  geom_vline(xintercept = -1, linetype = "dashed")+
+  xlim(-5, 5)+
+  ylim(0, 50)+
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))+
+  labs(title = "GSE10072", x = "log2FoldChange", y = "-log10(adj.pvalue)")+
+  #labs(caption = paste0("# of Downregulated Genes: ", Up_or_down[1],", # of No Significance Genes: ", Up_or_down[2],", # of Upregulated Genes: ", Up_or_down[3]))+
+  scale_color_manual(values = c("Downregulated" = "#7CC5D6",
+                                "No Significance" = "#2C2E2D",
+                                "Upregulated" = "#E74033"))+
+annotate("text", x = -3.75, y = 45, size = 3.5, label = paste("Downregulated Genes: ", significance_table [1]))+
+annotate("text", x = 3.75, y = 45, size = 3.5, label = paste("Upregulated Genes: ", significance_table [3]))
+
+ggsave(filename = file.path(Figure_Export, "DEG_GSE10072_Fig1C.png"))
+
+```
+

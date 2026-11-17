@@ -1,0 +1,1111 @@
+---
+title: "Initial Modeling"
+output: html_document
+---
+
+In this R-markdown document, this data frame will show at least the univariate logistic modeling, and potentially the multiple logistic modeling, as shown in Xiong et al 2020.
+
+**Instead of removing all patients that did not have scores for all 3 metrics, the steps will be the same but rather for each metric (Tumor Growth Risk, Lymph Node Invasion, or Metastasis Risk), the patients who do not contain that specific metric (such as unknown metastasis status) will be removed prior to the the modeling for that specific step.**
+
+**This is different than the non-V2 version which removes all of the patients with at least 1 missing metric prior to later downstream analysis**
+
+#Step 1: Import Packages, Set Pathways for Data, and Import the Upregulated and Downregulated Genes
+
+```{r}
+library(performance)
+library(tidyverse)
+library(here)
+library(broom)
+library(DescTools)
+library(gtsummary)
+library(plotROC)
+library(ResourceSelection)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+#Import Data
+
+Upregulated_Genes <- read.delim(file = file.path(Data_Import,"Upregulated_Genes.txt"), header = FALSE)
+
+Downregulated_Genes <- read.delim(file = file.path(Data_Import,"Downregulated_Genes.txt"), header = FALSE)
+
+#Vector of all the Genes
+All_Genes <- c(Upregulated_Genes, Downregulated_Genes)
+
+#Convert into one vector
+All_Genes <- unlist(All_Genes)
+
+```
+
+#Step 2: Import the Matrix
+
+Import the TCGA-LUAD processed matrix along with ColData which includes the survival and other metadata for this analysis. Additionally, the text files that contains the Upregulated and Downregulated genes in the TCGA-LUAD TCGA dataset and 3 NCBI GEO GSE datasets were imported.
+
+In the methods section of Xiong et al 2020, they noted that for this section of the analysis with modeling, they excluded patients that did not have enough data with respect to TNM(Tumor Growth Risk, Node Invasion, Metastasis Risk). Just like they only used 58 paired patient samples for the Differential Gene Expression Analysis for the TCGA-LUAD data set, they only used a specific segment of the patient data for the uni-logistic and multi-logistic modeling had a total of 370 patients after exclusion of patients that did not have complete TNM Scoring.
+
+**Instead of removing all patients that did not have scores for all 3 metrics, the steps will be the same but rather for each metric (Tumor Growth Risk, Lymph Node Invasion, or Metastasis Risk), the patients who do not contain that specific metric (such as unknown metastasis status) will be removed prior to the the modeling for that specific step.**
+
+```{r}
+#Import the TCGA-LUAD Matrix Data
+TCGA_LUAD_Matrix <- readRDS(file = file.path(Data_Import, "LUAD_counts.rds"))
+
+
+#Import Metadata, but called Coldata, for the LUAD Dataset
+LUAD_Coldata <- readRDS(file = file.path(Data_Import, "LUAD_Coldata.rds"))
+
+#Extract Risk for each of the 3  variables this analysis [Which is analyzing whether a patient will have Low/High Tumor Risk, Low/High Risk of Metastasis, and Low/High Risk of Lymph Invasion]
+
+LUAD_Coldata <- LUAD_Coldata %>% 
+  dplyr::select(barcode,  ajcc_pathologic_t, ajcc_pathologic_m, ajcc_pathologic_n) %>%
+  mutate(ajcc_pathologic_t = str_extract(ajcc_pathologic_t, "(.{2})"), #Xiong et al 2020 does not say with the differentiation of letter grades, only the numbers, so we combine them (Ex: T1a and T1b will become T1)
+         ajcc_pathologic_n = str_extract(ajcc_pathologic_n, "(.{2})")) %>% #This extracts the first 2 characters in the string
+  mutate(Risk_Level = case_when(
+    ajcc_pathologic_t %in% c("T1","T2") ~ "Low Risk", 
+    ajcc_pathologic_t %in% c("T3", "T4") ~ "High Risk", 
+    ajcc_pathologic_t %in% c(NA, "TX") ~ "Unknown")) %>%
+  mutate(Metastasis = case_when(
+    ajcc_pathologic_m %in% c("M0") ~ "No Metastasis",
+    ajcc_pathologic_m %in% c("MX", NA) ~ "Unknown Metastasis",
+    ajcc_pathologic_m %in% c("M1") ~ "Metastasis")) %>%
+  mutate(Lymph_Invasion = case_when(
+    ajcc_pathologic_n %in% c("N0") ~ "No Invasion",
+    ajcc_pathologic_n %in% c("NX", NA) ~ "Unknown Invasion",
+    ajcc_pathologic_n %in% c("N1","N2","N3") ~ "Invasion"))
+
+#Import the Genes that are Upregulated or Downregulated in all 3 datasets
+Downregulated_Genes <- read.delim(file = file.path(Data_Import, "Downregulated_Genes.txt"), header = FALSE)
+Downregulated_Genes <- Downregulated_Genes[,1]
+
+Upregulated_Genes <- read.delim(file = file.path(Data_Import, "Upregulated_Genes.txt"), header = FALSE)
+Upregulated_Genes <- Upregulated_Genes[,1]
+
+```
+
+#Step 3: Normalize the RNA-SEQ Matrix Data by Z-Score
+
+The LUAD Matrix counts were converted into Z-score counts along with filtering of low-count Genes and removal of patients without complete TNM scoring.
+
+```{r}
+#Drop when the rowSums of the Gene across all the samples is very low to speed up processing speed for genes of low significance.
+keep <- as.vector(rowSums(TCGA_LUAD_Matrix) > 10)
+
+TCGA_LUAD_Matrix <- TCGA_LUAD_Matrix[keep, ]
+
+# Function to calculate Z-scores with additional options
+
+counts_to_zscore <- function(counts, log_transform = TRUE, pseudo_count = 1) {
+# Step 1: Optional log transformation
+ if (log_transform) {
+# Add pseudo-count to avoid log(0)
+ expression_matrix <- log2(counts + pseudo_count)
+ } else {
+ expression_matrix <- counts
+ }
+
+  # Step 2: Calculate Z-scores
+  # scale() centers and scales the data by default
+  z_scores <- scale(expression_matrix)
+  
+# Convert to data frame and maintain row names
+z_scores_df <- as.data.frame(z_scores)
+rownames(z_scores_df) <- rownames(counts)
+
+return(z_scores_df)
+
+}
+
+#Run the Z-scoring
+Z_score_TCGA_LUAD <- counts_to_zscore(counts = TCGA_LUAD_Matrix, log_transform = TRUE, pseudo_count = 1)
+
+#Save Zscore when running
+#saveRDS(Z_score_TCGA_LUAD, file = file.path(Data_Import, "Z_score_TCGA_LUAD_V2.rds"))
+```
+
+
+#Step 4: Orient the Matrix and ColData
+
+After the Z score was calculated, the data was transposed and oriented to combine the Coldata with relevant metadata and the Z score count matrix.
+
+```{r}
+#Create the Pivoted Matrix needed for the Model to attach the ColData
+Combined_ZScore_Frame <- Z_score_TCGA_LUAD %>%
+  t() %>%
+  data.frame() %>%
+  rownames_to_column(., var = "barcode") 
+
+Combined_ZScore_Frame <- Combined_ZScore_Frame %>%
+  pivot_longer(cols = -c("barcode"), names_to = "Symbols", values_to = "Z_counts") 
+
+#Add the Coldata (which is one of the metadata types)
+Combined_ZScore_Frame <- Combined_ZScore_Frame %>%
+  left_join(., LUAD_Coldata, by = "barcode")
+
+# Identify high or low expression for each gene. If a gened Z-score (which is already normalized) is greater than 0, it means its greater than the average so it counts as a High Expression. If its less than 0, its lower expression
+Combined_ZScore_Frame <- Combined_ZScore_Frame %>%
+  group_by(Symbols) %>%
+  mutate(Expression_Level = if_else(Z_counts > 0, "High", "Low")) %>%
+  ungroup()
+```
+
+#Step 5: Review the distribution of each outcome and a few of the predictor variables.
+
+Prior to any univariate modeling, the distribution of each of the outcome variables.
+
+```{r}
+
+##Look at Distribution of the Variables of Interest
+#Risk Level
+
+frame <- Combined_ZScore_Frame
+
+frame %>%
+  dplyr::select(Risk_Level, Expression_Level) %>%
+  table()
+
+frame %>%
+  dplyr::select(Risk_Level, Expression_Level) %>%
+  table() %>%
+  prop.table(., margin = 1)
+
+frame %>%
+  dplyr::select(Risk_Level, Expression_Level) %>%
+  table() %>%
+  prop.table(., margin = 2)
+
+#Metastasis
+frame %>%
+  dplyr::select(Metastasis, Expression_Level) %>%
+  table()
+
+frame %>%
+  dplyr::select(Metastasis, Expression_Level) %>%
+  table() %>%
+  prop.table(., margin = 1)
+
+#Lymph Node Invasion
+frame %>%
+  dplyr::select(Lymph_Invasion, Expression_Level) %>%
+  table()
+
+frame %>%
+  dplyr::select(Lymph_Invasion, Expression_Level) %>%
+  table() %>%
+  prop.table(., margin = 1)
+
+
+```
+
+
+#Step 6: Pivot Data Wider to prepare for Logistic Modeling
+
+The dataframe with all the relevant data was  pivoted wider and the outcome variables, whether they were Risk Level of Tumor Growth, or other variables, were converted into a binary to allow the logistic model to work.
+
+```{r}
+#Pivot Data Wider to prepare for Logistic Modeling
+
+Fully_Manipulated_ZScore_Frame <- Combined_ZScore_Frame %>%
+  mutate(Expression_Level = if_else(Expression_Level == "High", 1,0)) %>%
+  mutate(Risk_Level = if_else(Risk_Level == "High Risk", 1, 0)) %>% #Converting High or Low Risk into a Binary
+  mutate(Lymph_Invasion = case_when(        
+    Lymph_Invasion == "No Invasion" ~ 0,
+    Lymph_Invasion == "Invasion" ~ 1, 
+    TRUE ~ NA)) %>% #Converting  Lymph Note Invasion into a Binary 
+  mutate(Metastasis = case_when(
+    Metastasis == "No Metastasis" ~ 0,
+    Metastasis == "Metastasis" ~ 1, 
+    TRUE ~ NA)) %>% #Converting No Metastasis or Metastasis into a Binary
+  dplyr::select(-c(ajcc_pathologic_m, ajcc_pathologic_t, ajcc_pathologic_n)) 
+```
+
+
+#Run the univariate logistic model for each gene for the affect on risk level for tumor growth for the Patient
+
+After the Z-scoring was calculated in the previous steps and further data manipulation and cleaning was performed, a univariate model can be run for each gene that was differentially expressed (whether upregulated or downregulated). For each gene that was differentially expressed in all 4 datasets, each of the genes were tested in a uni variate model to see if they have a statistically significant effect on the risk of tumor growth. 
+This was done by creating a function to perform this analysis so that genes that have a statistically significant effect alone can be isolated. Note, although this function does correct for multiple comparisons, as there are many genes being tested, that was not used for the functions for downstream analysis since Xiong et al 2020 did not say whether they corrected for multiple comparisons and an assumption was made that there was no correction if not stated.
+
+```{r}
+#Function to test each gene of interest in a univariate single predictor model
+Rapid_Univariate_Analysis <- function(data = dataframe, outcome_variable = "Risk_Level", Genes_of_Interest = NULL, Symbol_Column = "Symbols"){
+ 
+#Create Dataframe to store model information
+output_frame <- matrix(nrow = length(Genes_of_Interest), ncol = 4)
+colnames(output_frame) <- c("Gene_Name","p.value", "method", "coeff")
+output_frame <- as.data.frame(output_frame)
+
+#Choose the Column with all the Symbols
+  SYMBOLS <- data[[Symbol_Column]]
+
+#Filter out non-import genes prior to analysis
+input_frame <- data %>%
+  filter(SYMBOLS %in% Genes_of_Interest)
+
+#Run Loop to identify for each gene if it is statistically significant along in a univariate model
+for (i in 1:length(Genes_of_Interest)){
+  
+  #Choose Gene
+  Gene <- All_Genes[i]
+  
+  #Create Dataframe with column of Interest
+  DATA <- input_frame %>%
+    filter(Symbols == Gene) %>%
+    dplyr::select(c("Symbols","Z_counts", outcome_variable))
+  
+  #Create Model
+  model <- glm(formula = DATA[[outcome_variable]] ~ Z_counts, 
+                    data = DATA,
+                    family = "binomial"(link=logit))
+  
+  model_tidy <- tidy(model)
+  
+  ##Extract Information of Interest
+  
+  #Gene Name
+  output_frame[i,1] <- Gene
+  #P.value
+  output_frame[i,2] <- model_tidy[2, "p.value"] 
+
+  #Method
+  output_frame[i,3] <- model$method
+  #Coefficient
+  output_frame[i,4] <- model$coefficients[2]
+  
+  #Keep Track which gene is being analyzed
+  print(paste("Gene", i, "out of", length(Genes_of_Interest)))
+  
+}
+
+ #Corrected P value (Done by Bonferroni Hochberg by default)
+  
+  output_frame[["p.adjusted"]] <- p.adjust(output_frame[["p.value"]], method = "BH")
+  
+return(output_frame)
+}
+```
+
+Run the Rapid Univariate Model for Risk of Tumor Growth
+
+```{r}
+#Run Univariate Model Analysis on each genes effect on Risk Level for Tumor Growth
+Filtered_Frame <- Fully_Manipulated_ZScore_Frame %>%
+    drop_na(Risk_Level) # Filter out Patients where the status of the tumor growth risk is unknown
+    
+Tumor_Risk_Level_Univariate_model <- Rapid_Univariate_Analysis(data = Filtered_Frame,
+                          Genes_of_Interest = All_Genes,
+                          outcome_variable = "Risk_Level")
+
+#Graph the results 
+Tumor_Risk_Level_Univariate_model  %>%
+  mutate(coeff_variable = if_else(coeff > 0, "Pos","Neg")) %>%
+  ggplot(aes(x=coeff, y = -log10(p.value),
+             color = coeff_variable))+
+  geom_point(aes(size = abs(coeff)))+
+  theme_bw()+
+  scale_color_manual(values = c("Neg" = "skyblue","Pos" = "orange"))+
+  geom_text(hjust = 0, nudge_x = 0.05,
+            label = paste(Tumor_Risk_Level_Univariate_model$Gene_Name), color = "black")+
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black")+
+   labs(title = "Univariate model of each gene for effect on risk level of \n new Tumor Growth")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Univariate_Model_TumorRiskModel_Fig3a_V2.png"))
+
+#Filter out non-significant genes
+tumorgrowthrisk <- Tumor_Risk_Level_Univariate_model %>%
+  filter(p.value < 0.05)
+
+tumorgrowthrisk <- tumorgrowthrisk$Gene_Name
+
+
+
+```
+
+The above function strictly in a loop (used for testing purposes, but saved) before the function was written.
+
+```{r}
+#Loop Alone
+#All previously identified Upregulated
+All_Genes <- c(Upregulated_Genes, Downregulated_Genes)
+
+#Create Dataframe to store model information
+Risk_Level_Dataframe <- matrix(nrow = length(All_Genes), ncol = 4)
+colnames(Risk_Level_Dataframe) <- c("Gene_Name","p.value", "method", "coeff")
+Risk_Level_Dataframe <- as.data.frame(Risk_Level_Dataframe)
+
+#Filter out non-import genes prior to analysis
+input_frame <- Univar_model_Frame %>%
+  filter(Symbols %in% All_Genes)
+
+#Run Loop to identify for each gene if it is statistically significant along in a univariate model
+for (i in 1:length(All_Genes)){
+  
+  #Choose Gene
+  Gene <- All_Genes[i]
+  
+  #Create Dataframe with column of Interest
+  DATA <- input_frame %>%
+    filter(Symbols == Gene) %>%
+    dplyr::select(c("Symbols","Z_counts","Risk_Level"))
+  
+  #Create Model
+  model <- glm(formula = Risk_Level ~ Z_counts, 
+                    data = DATA,
+                    family = "binomial"(link=logit))
+  
+  model_tidy <- tidy(model)
+  
+  ##Extract Information of Interest
+  
+  #Gene Name
+  Risk_Level_Dataframe[i,1] <- Gene
+  #P.value
+  Risk_Level_Dataframe[i,2] <- model_tidy[2, "p.value"] 
+  #Method
+  Risk_Level_Dataframe[i,3] <- model$method
+  #Coefficient
+  Risk_Level_Dataframe[i,4] <- model$coefficients[2]
+  
+  #Keep Track which gene is being analyzed
+  print(paste("Gene", i, "out of", length(All_Genes)))
+  
+}
+```
+
+The original loop done with different dataframe manipulation that requires the data to be pivot_wider which causes the data to be less readable. This is kept for the sakes of transparency.
+
+```{r}
+#Format for Old Loop to work
+Univar_model_Frame2 <- Univar_model_Frame %>%
+  pivot_wider(data=., names_from = "Symbols", values_from = "Z_counts") 
+
+
+#Vector of all the Genes that are differentially expressed
+All_Genes <- c(Upregulated_Genes, Downregulated_Genes)
+
+#Create Dataframe to store model information
+Risk_Level_Dataframe <- matrix(nrow = length(All_Genes), ncol = 4)
+colnames(Risk_Level_Dataframe) <- c("Gene_Name","p.value", "method", "coeff")
+Risk_Level_Dataframe <- as.data.frame(Risk_Level_Dataframe)
+
+#Run Loop
+for (i in 1:length(All_Genes)){
+  
+  #Choose Gene
+  Gene <- All_Genes[i]
+  
+  #Create Dataframe with column of Interest
+  DATA <- Univar_model_Frame2[ ,c("Risk_Level",Gene)]
+  colnames(DATA) <- c("Risk_Level", "Gene_of_Interest")
+  
+  #Create Model
+  model <- glm(formula = Risk_Level ~ Gene_of_Interest, 
+                    data = DATA,
+                    family = "binomial"(link=logit))
+  
+  model_tidy <- tidy(model)
+  
+  ##Extract Information of Interest
+  
+  #Gene Name
+  Risk_Level_Dataframe[i,1] <- Gene
+  #P.value
+  Risk_Level_Dataframe[i,2] <- model_tidy[2, "p.value"] 
+  #Method
+  Risk_Level_Dataframe[i,3] <- model$method
+  #Coefficient
+  Risk_Level_Dataframe[i,4] <- model$coefficients[2]
+  
+  #Keep Track which gene is being analyzed
+  paste("Gene", i, "out of", length(All_Genes))
+  
+}
+
+
+#Graph the results 
+
+Risk_Level_Dataframe %>%
+  mutate(color_choice = if_else(coeff > 0, "Pos","Neg")) %>%
+  ggplot(aes(x=coeff, y = -log10(p.value),
+             color = color_choice))+
+  geom_point(aes(size = abs(coeff)))+
+  theme_bw()+
+  scale_color_manual(values = c("Neg" = "skyblue","Pos" = "orange"))+
+  geom_text(hjust = 0, nudge_x = 0.05,
+            label = paste(Risk_Level_Dataframe$Gene_Name), color = "black")+
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black")+
+   labs(title = "Univariate Modeling of each gene of overall Risk Level of \n new Tumor Growth")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+#Save equivalent graph to Figure 3a
+
+ggsave(filename = file.path(Figure_Export, "Univariate_Model_TumorRiskModel_Fig3a.png"))
+
+#Filter out non-significant genes
+tumorgrowthrisk <- Risk_Level_Dataframe %>%
+  filter(p.value < 0.05)
+
+tumorgrowthrisk <- tumorgrowthrisk$Gene_Name
+
+```
+
+
+
+#Univariate Model for each gene on their expression's effect on Lymph Invasion
+
+For each gene that was differentially expressed in all 4 datasets, each of the genes were tested in a univariate model to see if they have a statistically significant effect on Lymph Invasion.
+
+```{r}
+
+#Run Univariate Model Analysis on each genes effect on Risk Level for Lymph_Invasion
+Filtered_Frame <- Fully_Manipulated_ZScore_Frame %>%
+    drop_na(Lymph_Invasion) # Filter out Patients where the metric is unknown
+    
+Lymph_Invasion_Univariate_model <- Rapid_Univariate_Analysis(data = Filtered_Frame,
+                          Genes_of_Interest = All_Genes,
+                          outcome_variable = "Lymph_Invasion")
+
+#Graph the Data
+Lymph_Invasion_Univariate_model %>%
+  mutate(color_choice = if_else(coeff > 0, "Pos","Neg")) %>%
+  ggplot(aes(x=coeff, y = -log10(p.value),
+             color = color_choice))+
+  geom_point(aes(size = abs(coeff)))+
+  theme_bw()+
+  scale_color_manual(values = c("Neg" = "skyblue","Pos" = "orange"))+
+  geom_text(hjust = 0, nudge_x = 0.05,
+            label = paste(Lymph_Invasion_Univariate_model$Gene_Name), color = "black")+
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black")+
+  labs(title = "Univariate model of each gene on risk of Lymph Invasion")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+
+#Save equivalent graph to Figure 3b
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Univariate_Model_LymphInvasionModel_Fig3b_V2.png"))
+
+#Filter out non-significant genes amd isolate genes that were significant alone 
+lymphgenes <- Lymph_Invasion_Univariate_model %>%
+  filter(p.value < 0.05)
+
+lymphgenes <- lymphgenes$Gene_Name
+
+
+
+```
+
+#Univariate Model for each gene on their expression's effect on Metastasis
+
+For each gene that was differentially expressed in all 4 datasets, each of the genes were tested in a univariate model to see if they have a statistically significant effect on metastasis of the lung cancer.
+
+```{r}
+#Run Univariate Model Analysis on each genes effect on Risk Level for Metastasis
+Filtered_Frame <- Fully_Manipulated_ZScore_Frame %>%
+    drop_na(Metastasis) # Filter out Patients where the metric is unknown
+    
+Metastasis_Univariate_model <- Rapid_Univariate_Analysis(data = Filtered_Frame,
+                          Genes_of_Interest = All_Genes,
+                          outcome_variable = "Metastasis")
+
+#Graph the Data
+Metastasis_Univariate_model %>%
+  mutate(color_choice = if_else(coeff > 0, "Pos","Neg")) %>%
+  ggplot(aes(x=coeff, y = -log10(p.value),
+             color = color_choice))+
+  geom_point(aes(size = abs(coeff)))+
+  theme_bw()+
+  scale_color_manual(values = c("Neg" = "skyblue","Pos" = "orange"))+
+  geom_text(hjust = 0, nudge_x = 0.05,
+            label = paste(Metastasis_Univariate_model$Gene_Name), color = "black")+
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black")+
+  labs(title = "Univariate model of each gene on risk of Metastasis")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+#Save equivalent graph to Figure 3c
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Univariate_Model_MetastasisModel_Fig3c_V2.png"))
+
+
+#Filter out non-significant genes
+metastasis_genes <- Metastasis_Univariate_model%>%
+  filter(p.value < 0.05)
+
+metastasis_genes <- metastasis_genes$Gene_Name
+
+```
+
+
+#Proceed to Multi-logistic Analysis
+
+After Xiong et al 2020 performed univariate analysis on all the differentially expressed genes, they isolated all the genes that were found to have a statistically significant impact on either Tumor Growth Risk, Lymph Invasion Risk, or Metastasis risk. The first code chunk will be for the genes on elevated Tumor Risk with all of those genes. They showed that there is quite a bit of collinearity between the genes.
+
+```{r}
+#Create dataframe for multivariate Model
+multivariate_Zscore_frame <- Fully_Manipulated_ZScore_Frame %>% 
+  filter(Symbols %in% tumorgrowthrisk) %>% 
+  dplyr::select(-c(Lymph_Invasion, Expression_Level, Metastasis)) %>%
+  pivot_wider(names_from = "Symbols", values_from = "Z_counts") %>%
+  drop_na(Risk_Level)
+
+```
+
+
+The multi-logistic model will be now be run manually with all the genes that are impactful on the risk level of Tumor growth
+
+```{r}
+#Create Formula including all of these models
+formula <- reformulate(tumorgrowthrisk, response = "Risk_Level")
+
+multi_logistic_tumorgrowth_model <- glm(formula, 
+                                     data = multivariate_Zscore_frame,
+                                     family = "binomial"(link=logit))
+#Check Summary 
+summary(multi_logistic_tumorgrowth_model)
+
+#Check Model Assumptions
+check_model(multi_logistic_tumorgrowth_model)
+
+#Unsurprisingly, there is some collinearity for multiple genes. Therefore, a test for correlation between the genes will need to be done
+Fully_Manipulated_ZScore_Frame %>%
+  filter(Symbols %in% tumorgrowthrisk) %>%
+  select(c(barcode, Symbols, Z_counts)) %>% # Filtering for all of the Genes that are alone significant impact on Tumor Growth Risk
+  pivot_wider(., names_from = "Symbols", values_from = "Z_counts") %>% dplyr::select(-barcode) %>%
+  cor(.) %>%
+  corrplot::corrplot()
+
+#Look at Log-Odds and OR for a 1 point increase in the Z score
+multi_logistic_tumorgrowth_model %>%
+  tbl_regression(exponentiate = TRUE)
+
+multi_logistic_tumorgrowth_model %>%
+  tbl_regression(exponentiate = FALSE)
+
+multi_logistic_tumorgrowth_model %>%
+  tidy()
+
+#Identify C-stat (Area under the ROC Curve) and AUC
+Cstat(multi_logistic_tumorgrowth_model)
+
+#AIC value
+multi_logistic_tumorgrowth_model$aic
+
+
+```
+
+#Perform Manual Backwards step regression
+
+Although Xiong et al 2020 does not explain what type of stepwise regression. After the model with all of the genes effects on tumor growth risk level, the gene with the highest p-value, or least significant, was removed and the model was moved again by backwards selection. There is awareness that this isn't typically the best type of model designing framework, but for the sake of trying to reproduce their model, it was done.
+
+```{r}
+#Genes to be removed
+Genes_removed <- c()
+Genes_removed <- c()
+#Genes_Left
+gene_select <- tumorgrowthrisk[!tumorgrowthrisk %in% Genes_removed]
+
+#Create Formula including all of these models
+formula <- reformulate(gene_select, response = "Risk_Level")
+
+#Run and Check Model
+multi_tumorgrowth_model_0 <- glm(formula, 
+                                     data = multivariate_Zscore_frame,
+                                     family = "binomial"(link=logit))
+
+summary(multi_tumorgrowth_model_0)
+
+#Identify C-stat (Area under the ROC Curve)
+Cstat(multi_tumorgrowth_model_0)
+
+#AIC value
+multi_tumorgrowth_model_0$aic
+```
+
+#Backwards selection by written function
+
+Alternatively, instead of manually performing the backwards selection, a function was written to manually perform backwards selection for each of the genes in the multiple logistic model. There is awareness that backwards selection is typically not a good method for choosing model parameters, but that is what Xiong et al 2020 appeared to do. 
+
+This function will run backwards selection until all the predictors are statistically significant, and then select the model with the lowest AIC value (which is indicative of the best model among all options) and then return that model in the output. This is still the case even if a couple parameters which are not statistically significant are added back in
+
+Backward_Selection_Test[[1]] is the dataframe where the changes in Cstat/ROC and AIC of the model after removal of the gene
+Backward_Selection_Test[[2]] is the model where all the predictors are statistically significant
+Backward_Selection_Test[[3]] is the optimized model based on AIC values
+
+Furthermore, an explanation of each column will be done:
+
+Iteration = The iteration of the model, where iteration 1 means that no genes has been removed.
+
+Gene_Name_Removed <- The Gene that was removed from the model in this iteration.
+
+Cstat/ROC <- The Cstat/ROC of the model after the gene is removed from the model.
+
+pvalue_prior_to_removal <- **IMPORTANT NOTE**: This is the p-value of the gene in the model prior to being removed. So, for each row, the gene that was removed will have the Gene removed, the p value of the gene before it was removed, and then the Cstat/ROC and AIC of the model **after** removal of the gene.
+
+AIC-value <- The value of the AIC after removal of the gene.
+
+```{r}
+Backward_Selection_Test <- function(Gene_List = Gene_List, input_frame = model_frame, outcome_variable = "Risk_Level"){
+
+### Run Initial Model
+  
+  #Set Iteration
+  i <- 1
+  
+  #Set blank vector of vector of removed genes
+  List_of_removed_Genes <- c()
+  
+  #Create Dataframe
+  dataframe <- matrix(ncol = 5, nrow = length(Gene_List))
+  dataframe <- as.data.frame(dataframe)
+  colnames(dataframe) <- c("Iteration","Gene_Name_Removed", "C-stat/ROC", "pvalue_prior_to_removal", "AIC-value")
+  
+  #Run Initial Model
+  model_formula <- reformulate(Gene_List, response = outcome_variable)
+  
+  model <- glm(formula = model_formula, 
+               data = input_frame,
+               family = "binomial"(link=logit))
+ #Iteration 
+dataframe[i,1] <- 1
+
+#Initially No Genes Removed
+dataframe[i,2] <- NA
+   
+#Identify C-stat (Area under the ROC Curve) for initial model
+dataframe[i, 3] <- Cstat(model)
+
+#Look at Model
+model_tidy <- model %>% 
+  tidy() %>%
+  mutate(p_adjusted = p.adjust(p.value, method = "BH")) %>%
+  arrange(., by = desc(p.value))
+
+#Access p-value of the Gene that was removed (For the first iteration, it should be NA since no genes were removed)
+dataframe[i,4] <- NA
+
+#AIC value for initial model
+dataframe[i, 5] <- model$aic
+
+print("Finished Iteration 1")
+
+#Test_factor
+
+test_factor <- any(model_tidy[["p.value"]] > 0.05) 
+
+
+## Run Loop as the backwards selection occurs
+
+while(test_factor == TRUE){
+  
+  #Isolate Gene to be removed from model
+  Gene_to_be_Removed <- model_tidy[1,1]
+  
+  List_of_removed_Genes <- c(List_of_removed_Genes, Gene_to_be_Removed)
+  
+  
+  #Select the Iteration
+  i <- i + 1
+  
+  #Access p-value of the Gene in the model before its removed and a new model is ran
+  dataframe[i,4] <- model_tidy[1,5]
+  
+  #Remove the de-selected Genes
+  Genes_Selected <- Gene_List[!Gene_List %in% List_of_removed_Genes]
+  
+  #Run New Model
+  model_formula <- reformulate(Genes_Selected, response = outcome_variable)
+  
+  
+  model <- glm(model_formula, 
+               data = input_frame,
+               family = "binomial"(link=logit))
+  #Iteration
+dataframe[i,1] <- i
+
+#Gene that was Removed
+dataframe[i,2] <- Gene_to_be_Removed
+
+#Identify C-stat (Area under the ROC Curve) for initial model
+dataframe[i, 3] <- Cstat(model)
+
+#AIC value for initial model
+dataframe[i, 5] <- model$aic
+
+#Look at Model
+model_tidy <- model %>%
+  tidy() %>%
+  filter(term != "(Intercept)") %>%
+  mutate(p_adjusted = p.adjust(p.value, method = "BH")) %>%
+  arrange(., by = desc(p.value))
+
+#Extract p.value (Temporarily ommited for now since I want the p-value of in the model before the gene is removed, not after)
+#dataframe[i,4] <- model_tidy[1,5]
+
+#Checking Progress
+print(paste("Finished Iteration", i))
+
+#Test Factor Check
+test_factor <- any(model_tidy[["p.value"]] > 0.05) 
+
+}
+
+#Remove rows that are unneeded until all the remaining predictors are statistically significant
+dataframe <- dataframe[1:i, ]
+
+dataframe_with_model <- list(dataframe, model)
+
+## Choose the Optimized Model with the lowest AIC value
+
+#identify index of the gene removed with the lowest AIC model
+index <- dataframe %>% 
+  mutate(`AIC-value` = as.numeric(`AIC-value`)) %>%
+  slice_min(`AIC-value`)
+
+#
+index <- as.integer(index[1])
+#
+order_of_aic <- dataframe %>% 
+filter(Iteration <= index) %>%
+drop_na(Gene_Name_Removed)
+
+#
+
+genes_final_model <- as.vector(order_of_aic[["Gene_Name_Removed"]])
+                               
+##Run the optimized Model with the lowest AIC value
+
+#Remove the de-selected Genes
+  Genes_Selected_optimized <- Gene_List[!Gene_List %in% genes_final_model]
+  
+#Run Optimized Model
+  model_formula_optimized <- reformulate(Genes_Selected_optimized, response = outcome_variable)
+  
+  model_optimized <- glm(model_formula_optimized, 
+               data = input_frame,
+               family = "binomial"(link=logit))
+  
+
+##Attach the optimized model along with the dataframe that filtered out each gene individually
+export <- list(dataframe, model, model_optimized)
+
+return(export)
+
+}
+
+```
+
+
+The use of backwards selection, consistent with stepwise selection used by Xiong et al 2020, was used to identify and narrow down which genes are going to be statistically significant in a multi-logistic model on the effect of Tumor Growth Risk.
+
+```{r}
+#Run the Backwards Selection Function to do the backward selection work that I perform above
+Tumor_Risk_multilogistic_Model <- Backward_Selection_Test(input_frame = multivariate_Zscore_frame,
+                        Gene_List = tumorgrowthrisk,
+                        outcome_variable = "Risk_Level")
+
+
+
+
+#Look at the Dataframe of the iterations of the model
+Tumor_Risk_multilogistic_Model[[1]]
+
+#Look at the Model with all statistically significant predictors
+summary(Tumor_Risk_multilogistic_Model[[2]])
+
+#Look at AIC Optimized Model
+summary(Tumor_Risk_multilogistic_Model[[3]])
+
+#Use AIC optimized Model
+
+#Choose Model for Below Analysis
+Model_for_Stats <- Tumor_Risk_multilogistic_Model[[3]]
+
+#Check Model Assumptions ---> The Binned residuals continously has certain ones outside of the curve.
+check_model(Model_for_Stats)
+
+#Step 2: Homser-Lemeshow test on model fit
+
+HL <- hoslem.test(x = Model_for_Stats$y, y = fitted(Model_for_Stats), g = 10) 
+
+#Step 3: Calculate the AUC (area under the curve) of the Cstat/ROC curve and graph
+
+AUC <- round(Cstat(Model_for_Stats), 2)
+
+#Using the ROCR/plotROC packages, I can create a ROC plot from the ROC
+
+#Create the "Prediction Data" which I will just pull from the original dataframe
+mtgm <- multivariate_Zscore_frame %>% dplyr::select(barcode, all_of(tumorgrowthrisk))
+
+#Predicted Results
+mtgm$Predicted_Risk_Level <- predict(object = Model_for_Stats,
+                                 newdata = mtgm, 
+                                 type = c("response"))
+#Real_Results
+mtgm$Risk_Level <- multivariate_Zscore_frame$Risk_Level
+
+#Graph the ROC Graph of the Optimized Model
+ggplot(mtgm, aes(d = Risk_Level,                      # true disease label
+                     m = Predicted_Risk_Level)) +     # continuous biomarker that is predicted
+    geom_roc() +.                                     # draw ROC curve
+    geom_abline(slope = 1, intercept = 0)+
+    annotate("text", x = .9, y = .250,                 # add AUC score
+             label = paste("AUC =", AUC))+
+   annotate("text", x = 0.9, y = .45,                      # add Hoslem.test results
+             label = paste("Hoslem-Lemeshow test \n p =", round(HL$p.value, 2)))+
+  theme_bw()+
+  labs(x = "Sensitivity", y = "Specificity",
+       title = "ROC Curve of the Final Model for the Impact of Differentially Expressed \n Genes on Tumor Growth Risk")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+#Save plot
+ggsave(filename = file.path(Figure_Export,"V2_Modeling_Figures/Multiple_Logistic_TumorGrowth_RiskLevel_ROC_Fig_3e_V2.png"))
+
+
+```
+
+#Create Graph of Coefficients for each gene
+
+```{r}
+#Calculate the 95$ confident Interval
+risklevelCI <- as.data.frame(confint(Tumor_Risk_multilogistic_Model[[3]]))
+
+coefficients <- as.data.frame(Tumor_Risk_multilogistic_Model[[3]]$coefficients)
+coefficients <- Tumor_Risk_multilogistic_Model[[3]]$coefficients
+#Add Coeff
+risklevelCI$coeff <- coefficients
+
+#Graph Results
+risklevelCI <- risklevelCI %>%
+  rownames_to_column(., var = "Genes")
+
+risklevelCI %>% 
+  filter(Genes != "(Intercept)") %>%
+  ggplot(aes(x= Genes, y = coeff))+
+  geom_errorbar(aes(ymin = `2.5 %`, ymax = `97.5 %`),
+                width = 0.075, linewidth = 2, color = "skyblue")+
+  geom_point(color = "tomato4", size = 2)+
+  theme_classic() +
+  coord_flip() + 
+  geom_hline(yintercept = 0)+
+  labs(y = "coeff(95%CI)")+
+  theme(axis.title.y.left = element_blank(),
+        axis.text.y.left = element_text(face = "bold"),
+        axis.title.x.bottom = element_text(face = "bold"))
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Optimized_Multiple_Logistic_Model_Coeffs_TumorGrowthRisk_3D_V2.png"))
+```
+
+#Perform Backward Selection on the Genes that impact Lymph Node Invasion
+
+```{r}
+#Create dataframe for multivariate Model
+multivariate_Zscore_Lymph_Frame <- Fully_Manipulated_ZScore_Frame %>% 
+  filter(Symbols %in% lymphgenes) %>% 
+  dplyr::select(-c(Risk_Level, Expression_Level, Metastasis)) %>%
+  pivot_wider(names_from = "Symbols", values_from = "Z_counts") %>%
+  drop_na(Lymph_Invasion)
+
+#####Use Backwards Selection Function to optimize model 
+
+Backwards_Lymph_Invasion <- Backward_Selection_Test(input_frame = multivariate_Zscore_Lymph_Frame, 
+                               Gene_List = lymphgenes,
+                               outcome_variable = "Lymph_Invasion")
+
+#Look at the Dataframe of the iterations of the model
+Backwards_Lymph_Invasion[[1]]
+
+#Look at Model with only significant predictors
+summary(Backwards_Lymph_Invasion[[2]])
+
+#Look at the Optimized Model
+summary(Backwards_Lymph_Invasion[[3]])
+
+#Choose Model for Below Analysis
+Model_for_Stats <- Backwards_Lymph_Invasion[[3]]
+
+#Check Model Assumptions ---> The Binned residuals continously has certain ones outside of the curve.
+check_model(Model_for_Stats)
+
+#Step 2: Homser-Lemeshow test on model fit
+
+HL <- hoslem.test(x = Model_for_Stats$y, y = fitted(Model_for_Stats), g = 10) 
+
+#Step 3: Calculate the AUC (area under the curve) of the Cstat/ROC curve and graph
+
+AUC <- round(Cstat(Model_for_Stats), 2)
+
+#Using the ROCR/plotROC packages, I can create a ROC plot from the ROC
+
+#Create the "Prediction Data" which I will just pull from the original dataframe
+mtgm <- multivariate_Zscore_Lymph_Frame%>% dplyr::select(barcode, all_of(lymphgenes))
+
+#Predicted Results
+mtgm$Predicted_Values <- predict(object = Model_for_Stats,
+                                 newdata = mtgm, 
+                                 type = c("response"))
+#Real_Results
+mtgm$Lymph_Invasion <- multivariate_Zscore_Lymph_Frame$Lymph_Invasion
+
+#Graph the ROC Graph of the Optimized Model
+ggplot(mtgm, aes(d = Lymph_Invasion,                      # true disease label
+                     m = Predicted_Values)) +     # continuous biomarker that is predicted
+    geom_roc() +                                  # draw ROC curve
+    geom_abline(slope = 1, intercept = 0)+
+    annotate("text", x = .9, y = .250,                 # add AUC score
+             label = paste("AUC =", AUC))+
+   annotate("text", x = 0.9, y = .45,                      # add Hoslem.test results
+             label = paste("Hoslem-Lemeshow test \n p =", round(HL$p.value, 2)))+
+  theme_bw()+
+  labs(x = "Sensitivity", y = "Specificity",
+       title = "ROC Curve of the Final Model for the Impact of Differentially Expressed \n Genes on Lymph Invasion")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Multiple_Logistic_Lymph_Invasion_ROC_Fig_3g_V2.png"))
+```
+
+
+
+#Create Graph of Coefficients for each gene for Lymph Invasion
+
+Create a graph showing the coefficient, or effect of each gene as the Z-score goes up 1 and its effect on Lymph Node Invasion
+
+```{r}
+#Calculate the 95$ confident Interval
+model <- Backwards_Lymph_Invasion
+
+LymphCI <- as.data.frame(confint(model[[3]]))
+
+coefficients <- model[[3]]$coefficients
+
+#Add Coeff
+LymphCI$coeff <- coefficients
+
+#Graph Results
+LymphCI <- LymphCI %>%
+  rownames_to_column(., var = "Genes")
+
+LymphCI %>% 
+  filter(Genes != "(Intercept)") %>%
+  ggplot(aes(x= Genes, y = coeff))+
+  geom_errorbar(aes(ymin = `2.5 %`, ymax = `97.5 %`),
+                width = 0.075, linewidth = 2, color = "skyblue")+
+  geom_point(color = "tomato4", size = 2)+
+  theme_classic() +
+  coord_flip() + 
+  geom_hline(yintercept = 0)+
+  labs(y = "coeff(95%CI)")+
+  theme(axis.title.y.left = element_blank(),
+        axis.text.y.left = element_text(face = "bold"),
+        axis.title.x.bottom = element_text(face = "bold"))
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Optimized_Multiple_Logistic_Model_Coeffs_LymphInvasion_3F_V2.png"))
+```
+
+
+
+
+#Perform Backward Selection on the Genes on Metastasis
+
+```{r}
+#Create dataframe for multivariate Model
+multivariate_Zscore_Metastasis_Frame <- Fully_Manipulated_ZScore_Frame %>% 
+  filter(Symbols %in% metastasis_genes) %>% 
+  dplyr::select(-c(Risk_Level, Expression_Level, Lymph_Invasion)) %>%
+  pivot_wider(names_from = "Symbols", values_from = "Z_counts") %>%
+  drop_na(Metastasis)
+
+
+###Use Backwards Selection Function
+Backwards_Metastasis_dataframe <- Backward_Selection_Test(input_frame = multivariate_Zscore_Metastasis_Frame, 
+                               Gene_List = metastasis_genes,
+                               outcome_variable = "Metastasis")
+
+#Look at Graph
+Backwards_Metastasis_dataframe[[1]]
+
+#Metastasis Model with statistically significant predictors
+summary(Backwards_Metastasis_dataframe[[2]])
+
+#AIC optimized Model
+summary(Backwards_Metastasis_dataframe[[3]])
+
+#Choose Model for Below Analysis
+Model_for_Stats <- Backwards_Metastasis_dataframe[[3]]
+
+#Check Model Assumptions ---> The Binned residuals continously has certain ones outside of the curve.
+check_model(Model_for_Stats)
+
+#Step 2: Homser-Lemeshow test on model fit
+
+HL <- hoslem.test(x = Model_for_Stats$y, y = fitted(Model_for_Stats), g = 10) 
+
+#Step 3: Calculate the AUC (area under the curve) of the Cstat/ROC curve and graph
+
+AUC <- round(Cstat(Model_for_Stats), 2)
+
+#Using the ROCR/plotROC packages, I can create a ROC plot from the ROC
+
+#Create the "Prediction Data" which I will just pull from the original dataframe
+mtgm <- multivariate_Zscore_Metastasis_Frame %>% dplyr::select(barcode, all_of(metastasis_genes))
+
+#Predicted Results
+mtgm$Predicted_Values <- predict(object = Model_for_Stats,
+                                 newdata = mtgm, 
+                                 type = c("response"))
+#Real_Results
+mtgm$Metastasis <- multivariate_Zscore_Metastasis_Frame$Metastasis
+
+#Graph the ROC Graph of the Optimized Model
+ggplot(mtgm, aes(d = Metastasis,                      # true disease label
+                     m = Predicted_Values)) +     # continuous biomarker that is predicted
+    geom_roc() +                                  # draw ROC curve
+    geom_abline(slope = 1, intercept = 0)+
+    annotate("text", x = .9, y = .250,                 # add AUC score
+             label = paste("AUC =", AUC))+
+   annotate("text", x = 0.9, y = .45,                      # add Hoslem.test results
+             label = paste("Hoslem-Lemeshow test \n p =", round(HL$p.value, 2)))+
+  theme_bw()+
+  labs(x = "Sensitivity", y = "Specificity",
+       title = "ROC Curve of the Final Model for the Impact of Differentially Expressed \n Genes on Metastasis")+
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Multiple_Logistic_Model_Metastasis_ROC_Fig_3i_V2.png"))
+
+
+```
+
+
+#Create Graph of Coefficients for each gene for Metastasis
+
+Create a graph showing the coefficient, or effect of each gene as the Z-score goes up 1 and its effect on Metastasis of the tumor.
+
+```{r}
+#Calculate the 95$ confident Interval
+model <- Backwards_Metastasis_dataframe
+
+MetaCI <- as.data.frame(confint(model[[3]]))
+
+coefficients <- model[[3]]$coefficients
+
+#Add Coeff
+MetaCI$coeff <- coefficients
+
+#Graph Results
+MetaCI  <- MetaCI  %>%
+  rownames_to_column(., var = "Genes")
+
+MetaCI  %>% 
+  filter(Genes != "(Intercept)") %>%
+  ggplot(aes(x= Genes, y = coeff))+
+  geom_errorbar(aes(ymin = `2.5 %`, ymax = `97.5 %`),
+                width = 0.075, linewidth = 2, color = "skyblue")+
+  geom_point(color = "tomato4", size = 2)+
+  theme_classic() +
+  coord_flip() + 
+  geom_hline(yintercept = 0)+
+  labs(y = "coeff(95%CI)")+
+  theme(axis.title.y.left = element_blank(),
+        axis.text.y.left = element_text(face = "bold"),
+        axis.title.x.bottom = element_text(face = "bold"))
+
+ggsave(filename = file.path(Figure_Export, "V2_Modeling_Figures/Optimized_Multiple_Logistic_Model_Coeffs_Metastasis_3H_V2.png"))
+```

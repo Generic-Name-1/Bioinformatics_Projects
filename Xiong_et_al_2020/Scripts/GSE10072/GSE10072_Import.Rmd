@@ -1,0 +1,105 @@
+---
+title: "GSE10072_IMport"
+output: html_document
+---
+
+
+
+#Activate the relevant R package libraries
+
+```{r}
+library(GEOquery)
+library(here)
+library(tidyverse)
+library(affy)
+library(affyio)
+library(R.utils)
+library(biomaRt)
+library(AnnotationDbi)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+#Import the Data from GEOquery
+
+```{r}
+
+#Import the Data from NCBI GEO Omnibus
+GSE10072 <- getGEO('GSE10072', destdir = Data_Import, GSEMatrix = TRUE, AnnotGPL = TRUE )
+
+#Extract Expression Matrix (The Microarray Counts)
+Matrix <- exprs(GSE10072[[1]])
+
+Matrix <- Matrix %>% as.data.frame()
+
+
+#Access Metadata (There are multiple ways to do this)
+Metadata <-  pData(phenoData(GSE10072[[1]]))
+
+
+#Feature Data and then extract Gene Names 
+Features <- GSE10072$GSE10072_series_matrix.txt.gz@featureData@data
+
+
+
+```
+
+#Check Distribution to see if the data needs normalization
+
+By looking at boxplots of each of the samples, we can see if the data already underwent normalization. This data has each sample with the distribution of the counts roughly the same with the medians all roughly equal which means it was likely already normalized. As Xiong et al 2020 does not indicate if they use the raw data and normalize or use the pre-processed normalized data from GEOquery, the data from GEOquery will be used.
+
+In Metadata$data_processing, the data can be seen to have been normalized via RMA, but a check will be done to ensure that.
+
+```{r}
+Matrix %>%
+  pivot_longer(., cols = 1:107, names_to = "Samples", values_to = "Counts") %>%
+  ggplot(aes(x = Samples, y = Counts))+
+  geom_boxplot()
+```
+
+#Convert the Probe IDs to Gene Symbols
+
+The same steps repeated for the previous GSE datasets will be for the GSE 10072 dataset where the Probe IDs will be correlated to the gene symbol from the Feature annotations. It is easier and preferred if the set gives the annotation, but there are other steps if those annotations are not given.
+
+```{r}
+
+#Look at the Matrix
+glimpse(Matrix)
+
+#Check if the rownames of the matrix is equal to the Probe IDs in order and values
+identical(rownames(Matrix), Features$ID)
+
+#This is the case, so now the Gene Symbol will be added
+Matrix <- Matrix %>%
+  mutate(Symbol = Features$`Gene symbol`)
+
+#Now, we will look at the duplicates to see what type of duplicates they are
+Matrix %>% 
+  group_by(Symbol) %>%
+  filter(n() >= 2) %>% dplyr::select(Symbol, GSM254625, GSM254626, GSM254627)
+  
+  #Since it looks like the duplicate gene expression is roughly even, so the mean will be taken between all of the duplicates. For genes without a correlated symbol, a rownumber will be applied to them so the grouping doesn't combine all the blank symbol rows together.
+  
+  Matrix <- Matrix %>%
+    mutate(Gene_Symbol_Blank = if_else(Symbol == "", as.character(row_number()), Symbol)) %>% 
+    group_by(Gene_Symbol_Blank) %>%
+    summarise(across(where(is.numeric), mean))
+  
+  #Convert the Column back into the rownames
+  Matrix <- Matrix %>%
+    column_to_rownames(., var = "Gene_Symbol_Blank")
+```
+
+#Export and Save Data
+
+```{r}
+
+saveRDS(object = Matrix, file = file.path(Data_Import, "GSE10072_Processed_Data.rds"))
+
+saveRDS(object = Metadata, file = file.path(Data_Import, "GSE10072_Metadata.rds"))
+
+```
+

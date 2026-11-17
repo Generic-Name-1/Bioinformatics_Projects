@@ -1,0 +1,135 @@
+---
+title: "TCGA_LUAD_Import"
+output: html_document
+---
+
+
+#Step 1): Activate the proper libraries
+
+The proper R packages need to be activated before the data from the TCGA database can occur.
+
+```{r}
+library(tidyverse)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(here)
+
+#Create the Export File Pathways
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+#Step 2: Import Data from the TCGA Database
+
+The data needs to be imported using the TCGA biolinks package.
+
+```{r}
+TCGA_LUAD <- GDCquery(
+  project = "TCGA-LUAD",
+  data.category = "Transcriptome Profiling",
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  data.type = "Gene Expression Quantification",
+  sample.type = c("Primary Tumor","Solid Tissue Normal"), #I want to include both tumor tissue and solid normal tissue for this analysis!
+  access = "open"
+)
+
+#We can use this output later in the analysis so that we can later analysis
+output <- getResults(TCGA_LUAD)
+
+#Download Data
+GDCdownload(TCGA_LUAD, 
+            directory = file.path(here(),"Data/GDCdata"))
+```
+
+#Step 3: Import Metadata and Clinical Data
+
+```{r}
+#Import Clinical Data
+clinical_data_LUAD <- GDCquery_clinic("TCGA-LUAD",
+                                 type = "clinical", save.csv = FALSE)
+
+#Save as RDS object to save space 
+saveRDS(clinical_data_LUAD, file = file.path(Data_Import, "LUAD_Clinicaldata.rds"))
+
+#Import ColData
+LUAD <- GDCprepare(TCGA_LUAD, summarizedExperiment = TRUE, 
+                   directory = file.path(here(),"Data/GDCdata")) #Extract the data using GDCprepare
+
+LUAD_coldata <- as.data.frame(colData(LUAD))
+LUAD_metadata <- as.data.frame(rowData(LUAD))
+
+#Save as RDS object 
+saveRDS(LUAD_coldata, file = file.path(Data_Import, "LUAD_Coldata.rds"))
+saveRDS(LUAD_metadata, file = file.path(Data_Import, "LUAD_Metadata.rds"))
+
+#Import The matrix data
+LUAD_matrix <- assay(LUAD, "unstranded") #The unstranded data is the raw TCGA count data extracted from the TCGA database.
+LUAD_matrix <- LUAD_matrix %>% as.data.frame()
+
+#Extract from Metadata the gene symbols that will be used (so we don't need to get them elsewhere)
+Gene_Symbols <- LUAD_metadata %>% dplyr::select(gene_id, gene_name)
+
+#########
+
+#Since ensembl is transitioning to a new system,  so ensemble does not work anymore. Therefore, I will not try to reproduce this section using 
+#BiomaRT since it is not in use anymore. I will do this via the gtf file which I manually downloaded since it should be in theory the same. However, there are other R packages where I can import the data from as well. T
+library(rtracklayer)
+
+#The gtf file can be downloaded and imported into R using the rtracklayer package as well as going to the Broad Institute database and downloading the relevant file.
+gtf <- import(file.path(Data_Import, "Homo_sapiens.GRCh38.116.chr.gtf.gz"))
+
+#3) Create gene symbol mapping by using columns (gtf)
+ 
+gene_symbols_gtf <- unique(data.frame(
+      gene_id = gtf$gene_id,
+      gene_symbol = gtf$gene_name))
+
+```
+
+#Step 4: Perform data pre-processing
+
+Instead of doing the required data pre-processing, such as ensuring matching columns and rows, during the Differential Gene Expression Analysis, the pre-processing will be performed prior to saving.
+
+```{r}
+#The first step is always to check if the rownames from the ColData are the same as the column names of the counts matrix
+identical(LUAD_coldata$barcode, colnames(LUAD_matrix))
+
+#This is true, so we are good to move to the next step
+
+#Check for any duplicate ENS gene IDS 
+sum(duplicated(rownames(LUAD_matrix)))
+
+#Optional#
+#Since there are no duplicate ensgene gene ids, but there are likely duplicates when we go to symbols since multiple ENS Gene IDs are correlated to the same gene symbol. We can either fix this now or later. Since gene level, not transcript level analysis needs to be done, we will group them and combine them grouped by gene symbol
+
+LUAD_matrix <- LUAD_matrix %>%
+  rownames_to_column(., var = "ensgene") %>% 
+  left_join(., Gene_Symbols, by = c("ensgene" = "gene_id")) %>% #joining the ens gene IDs and gene_name from the Gene_Symbols from the database
+  group_by(gene_name) %>% #Group by each gene_name where multiple transcripts might all be correlated to the same gene
+  dplyr::select(-ensgene) %>% 
+  summarize(across(everything(), sum)) %>% #For each duplicated Gene_Name, the counts will be summed together, although there are alternatives (Taking mean, using highest transcript count)
+  column_to_rownames(., var = "gene_name")
+
+```
+
+#Step 5: Check again to ensure the ordering is appropriate
+
+```{r}
+#Do barcode in coldata matches the colnames in the matrix?
+identical(LUAD_coldata$barcode, colnames(LUAD_matrix))
+
+#Yes
+
+#Are their duplicated symbols? Did the grouping by ENS gene IDs work with each gene to remove duplicates.
+sum(duplicated(rownames(LUAD_matrix)))
+
+#Yes
+
+#Save the Datasets
+saveRDS(object = LUAD_matrix, file = file.path(Data_Import, "LUAD_counts.rds"))
+```
+
+

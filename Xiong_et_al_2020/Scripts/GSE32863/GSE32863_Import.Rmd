@@ -1,0 +1,99 @@
+---
+title: "GSE32863"
+output: html_document
+---
+
+
+
+#Activate the relevant R package libraries
+
+```{r}
+library(GEOquery)
+library(here)
+library(tidyverse)
+library(affy)
+library(affyio)
+library(R.utils)
+library(biomaRt)
+library(AnnotationDbi)
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+```
+
+#Import the Data from GEOquery
+
+```{r}
+
+#Import the Data from NCBI GEO Omnibus
+GSE32863 <- getGEO("GSE32863", destdir = Data_Import, GSEMatrix = TRUE)
+
+#Extract Expression Matrix (The Microarray Counts)
+Matrix <- exprs(GSE32863[[1]])
+
+Matrix <- Matrix %>% as.data.frame()
+
+#Access Metadata
+Metadata <- GSE32863$GSE32863_series_matrix.txt.gz@phenoData@data
+
+
+#Feature Data and then extract Gene Names (This appears to have all of the feature and gene annotation data with it which is nice
+Features <- GSE32863$GSE32863_series_matrix.txt.gz@featureData@data
+
+
+```
+
+#Check Distribution to see if the data needs normalization
+
+This data appears to be already normalized, but the original paper that is associated with this dataset (https://doi.org/10.1101/gr.132662.111) uses Robust Spline Normalization rather than RMA. However, Xiong et al 2020 does not seem to explain what they did with respect to normalization of the data. Therefore, an assumption will be made that they used the processed normalized data that was uploaded to NCBI GEO in GSE322863. If this turns out to be a faulty assumption, the raw data will be downloaded and rma() will be performed on it prior to later downstream analysis.
+
+```{r}
+Matrix %>%
+  pivot_longer(., cols = 1:116, names_to = "Samples", values_to = "Counts") %>%
+  ggplot(aes(x = Samples, y = Counts))+
+  geom_boxplot()
+```
+
+#Convert the Probe IDs to Gene Symbols
+
+```{r}
+
+#Look at the Matrix
+glimpse(Matrix)
+
+#Check if the rownames of the matrix is equal to the Probe IDs in order and values
+identical(rownames(Matrix), Features$ID)
+
+#This is the case, so now the Gene Symbol will be added
+Matrix <- Matrix %>%
+  mutate(Symbol = Features$Symbol)
+
+#Now, we will look at the duplicates to see what type of duplicates they are
+Matrix %>% 
+  group_by(Symbol) %>%
+  filter(n() >= 2) %>% dplyr::select(Symbol, GSM813523, GSM813524, GSM813525) %>% view()
+  
+  #Since it looks like the values are roughly even, and each probe may be identifying a different part of the gene, the mean of all of the probes for each gene will be taken. For each duplicated gene, the mean of the counts across all of the probes bound to the same duplicate will be used. If there is no Symbol, a number will be assigned an
+  
+  Matrix <- Matrix %>%
+    mutate(Gene_Symbol_Blank = if_else(Symbol == "", as.character(row_number()), Symbol)) %>% #Ensures that rows with no symbol get assigned their own "rownumber" to avoid bad grouping
+    group_by(Gene_Symbol_Blank) %>%
+    summarise(across(where(is.numeric), mean))
+  
+  #Convert the Column back into the rownames
+  Matrix <- Matrix %>%
+    column_to_rownames(., var = "Gene_Symbol_Blank")
+```
+
+#Export and Save Data
+
+```{r}
+
+saveRDS(object = Matrix, file = file.path(Data_Import, "GSE32863_Processed_Data.rds"))
+
+saveRDS(object = Metadata, file = file.path(Data_Import, "GSE32863_Metadata.rds"))
+
+```
+

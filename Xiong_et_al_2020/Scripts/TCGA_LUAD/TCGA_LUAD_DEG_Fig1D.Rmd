@@ -1,0 +1,184 @@
+---
+title: "TCGA_LUAD_DEG_Fig1D"
+output: html_document
+---
+
+This R Markdown file is where DESeq2 will be used to run Differential Gene Expression on the TCGA-LUAD dataset to try to reproduce figure 1D from Xiong et al 2020.
+
+#Activate Libraries and Import Files
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(SummarizedExperiment)
+library(DESeq2)
+library(here)
+
+#Create the Export File Pathways
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+#Import Matrix
+
+LUAD_counts <- readRDS(file = file.path(Data_Import, "LUAD_counts.rds"))
+
+#Import Clinical Data
+
+LUAD_clinical_data <- readRDS(file = file.path(Data_Import, "LUAD_Clinicaldata.rds"))
+
+#Import coldata
+
+LUAD_coldata <- readRDS(file = file.path(Data_Import, "LUAD_Coldata.rds"))
+
+#Select specific columns of interest in the ColData and then ensure each rowname has an equivalent colname in the counts matrix
+PCA_metrics <- LUAD_coldata %>% dplyr::select(barcode, definition, classification_of_tumor)
+PCA_metrics <- PCA_metrics[colnames(LUAD_counts),]
+
+#Import Metadata
+
+LUAD_Metadata <- readRDS(file = file.path(Data_Import, "LUAD_Metadata.rds"))
+
+
+```
+
+#Run PCA analysis on the TCGA-LUAD counts to look for potential batch effects
+
+Prior to filtering, a Principal Component Analysis was run to look for potential batch effects or confounding variables in the data. Although the A2M counts seem very high, they were not removed. This was performed prior to any later downstream filtering was performed prior to DESeq2.
+
+```{r}
+#Filter out of the LUAD_counts from A2M because it seems very high and likely an artifact or something else strange is going on.
+
+LUAD_counts <- LUAD_counts[rownames(LUAD_counts) != "A2M", ]
+
+#Ensure to make sure the order and # of columns in the PCA metrics and the columns in hte count matrix, LUAD_counts
+identical(PCA_metrics$barcode, colnames(LUAD_counts))
+
+library(factoextra)
+library(MASS)
+
+#Create matrix in format for PCA analysis
+PCA_matrix <- LUAD_counts %>% t()
+
+#Run PCA and Graph
+PCA <- prcomp(PCA_matrix, scale = FALSE)
+
+#Quick way to make a biplot
+fviz_pca_biplot(PCA,
+                habillage = PCA_metrics$definition,
+                geom.var = c(""), 
+                label = "none",
+                title = "PCA of TCGA-LUAD Dataset")
+
+#Save plot
+#ggsave(filename = file.path(Figure_Export, "PCA_TCGA-LUAD.png"))
+
+```
+
+#Run Filtering based on Xiong 2020 critera
+
+Xiong et al 2020 runs  using 58 tumor and 58 patient samples from the TCGA-LUAD dataset to run the Differential Gene Expression. The problem is that they do not explain what criteria that they used to choose those variables. It appears that they should be paired samples, but there are not 58 pairs of patients with a tumor and normal tissue respectively. However, based selecting only patients with matching normal tissue and tumor samples as well as following the [Broad Institute criteria](https://broadinstitute.atlassian.net/wiki/spaces/GDAC/pages/844334036/FAQ#FAQ-replicateFiltering) if you have multiple aliquot barcodes per sample, 58 matched samples were obtained and this is what was used for the downstream analysis.
+
+```{r}
+#Filter where we have paired samples (so where there are 2 samples per patient). The decision was made to choose the samples where there is a paired sample 
+LUAD_coldata_pairs <- LUAD_coldata %>%
+  dplyr::group_by(patient) %>%
+  dplyr::filter(n() >= 2) %>% 
+  dplyr::arrange(patient)
+
+#Keep samples with normal tissue
+normal_tissue_barcodes <- LUAD_coldata_pairs %>%
+  ungroup() %>%
+  filter(definition == "Solid Tissue Normal")
+
+#Keeping the sample with the Primary Tumor Based on Broad Institute Criteria (Showed above)
+
+Tumor_tissue_barcodes <- LUAD_coldata_pairs %>%
+  ungroup() %>%
+  filter(definition == "Primary solid Tumor") %>%
+  dplyr::select(definition, barcode, patient, sample) %>%
+  group_by(patient) %>%
+  mutate(Plate_Number = gsub("^.{21}([[:alnum:]]{4}).*", "\\1", barcode)) %>% #Extract the 4 alphanumeric digits from the code in 2nd to last barcode
+  mutate(Plate_Number = sub("[[:alpha:]]", "0", Plate_Number)) %>% #Substitute the A for a 0 so I can choose the highest plate number (based on Broad Criteria)
+  filter(Plate_Number == max(Plate_Number)) #Choose the sample with the largest plate #
+
+#Filter the tumor-tissues where there is a matching patient for normal tissue
+Tumor_tissue_barcodes <- Tumor_tissue_barcodes %>%
+  filter(patient %in% normal_tissue_barcodes$patient)
+
+#Now, create a vector that is the combination of both of barcodes
+
+keep_barcodes <- c(Tumor_tissue_barcodes$barcode, normal_tissue_barcodes$barcode)
+
+
+#Filter out the Counts so that only patients matching this criteria are used
+LUAD_counts <- LUAD_counts[,colnames(LUAD_counts) %in% keep_barcodes]
+
+LUAD_coldata <- LUAD_coldata[LUAD_coldata$barcode %in% keep_barcodes,]
+```
+
+
+#Run DESeq 
+
+Run DESeq to get the Differential Expression Results using the same package that was used in Xiong et al 2020 for the bulk RNA-SEQ analysis. One thing to note is that they used older versions of R and older versions of DESeq2 that could not be obtained, so that is another potential factor that may influence why the results may not 100% match the results identified in Xiong et al 2020.
+
+```{r}
+#Create the DESeq Object
+dds <- DESeqDataSetFromMatrix(countData = LUAD_counts,
+                              colData = LUAD_coldata,
+                              design = ~ definition)
+
+#Filter Rows (which are correlated to genes) where the entire counts between all the samples is less than 10
+
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+
+#Run DESeq
+
+LUAD_DESEQ <- DESeq(object = dds)
+
+
+#Convert the Object into results and compares the expression of Primary Solid Tumor / Solid Tissue Normal wheres a Log2FC change of 1 would mean that expression in the Tumor is twice as much as the normal tissue.
+
+results <- results(LUAD_DESEQ, alpha = 0.05, 
+                   contrast = c("definition", "Primary solid Tumor", "Solid Tissue Normal"))
+
+results <- as.data.frame(results)
+
+results <- results %>%
+  mutate(Significance = case_when(
+    padj < 0.05 & log2FoldChange > 1 ~ "Upregulated",
+    padj < 0.05 & log2FoldChange < -1 ~ "Downregulated",
+    TRUE ~ "No Significance")) %>%
+  mutate(Fold_Change = 2^log2FoldChange) %>% #Calculate Log Fold Change
+  mutate(padj = if_else(is.na(padj) == TRUE, pvalue, padj)) #If there is no p-adjusted value, just make the padj = pval since they are not significant anyways
+
+#Graph the results
+
+#Table of # of Genes upregulated or downregulated
+Up_or_down <- table(results$Significance)
+
+results %>%
+  ggplot(aes(x=log2FoldChange, y = -log10(padj)))+
+  geom_point(aes(color = Significance))+
+  geom_vline(xintercept = 1, linetype = "dashed")+
+  geom_vline(xintercept = -1, linetype = "dashed")+
+  xlim(-10,10)+
+  ylim(0, 150)+
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))+
+  labs(title = "TCGA-LUAD")+
+  #labs(caption = paste0("# of Downregulated Genes: ", Up_or_down[1],", # of No Significance Genes: ", Up_or_down[2],", # of Upregulated Genes: ", Up_or_down[3]))+
+  scale_color_manual(values = c("Downregulated" = "#7CC5D6",
+                                "No Significance" = "#2C2E2D",
+                                "Upregulated" = "#E74033"))+
+annotate("text", x = -7.5, y = 145, size = 3.5, label = paste("Downregulated Genes: ", Up_or_down[1]))+
+annotate("text", x = 7.5, y = 145, size = 3.5, label = paste("Upregulated Genes: ", Up_or_down[3]))
+
+#ggsave(filename = file.path(Figure_Export,"DEG_TCGA-LUAD_1D.png"))
+
+#Save the Results Dataframe as an object
+#saveRDS(object = results, file = file.path(Data_Import, "TCGA-LUAD_DEG_results.rds"))
+  
+  
+```
+

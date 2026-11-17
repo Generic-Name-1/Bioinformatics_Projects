@@ -1,0 +1,204 @@
+---
+title: "GSE43458_DEG"
+output: html_document
+---
+
+
+#Import Library 
+
+```{r}
+library(tidyverse)
+library(limma)
+library(factoextra)
+library(MASS)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+```
+
+#Import the Processed GSE43458 Matrix
+
+Import the previously processed matrix count from GSE43458 and the Metadata along with selecting specific columns for later downstream analysis.
+
+```{r}
+#Import Matrix Counts 
+Matrix <- readRDS(file = file.path(Data_Import, "GSE43458_Processed_Data.rds"))
+
+Matrix <- Matrix %>% column_to_rownames(., var = "Symbol")
+
+#Import Metadata
+Metadata <- readRDS(file = file.path(Data_Import, "GSE43458_Metadata.rds"))
+
+#Select Metadata of Interest and Create a Variable based on tissue type and smoking status
+
+Columns_of_Interest <- Metadata %>% dplyr::select(geo_accession,
+                                                  Tissue_Type = characteristics_ch1,
+                                                  Smoking_Status = characteristics_ch1.2)
+
+Columns_of_Interest <- Columns_of_Interest %>%
+  mutate(Tissue_Type = gsub("tissue: ", "",Tissue_Type),
+         Smoking_Status = gsub("smoking status: ","", Smoking_Status)) %>%
+  mutate(Smoking_and_Tissue_Type = paste0(Tissue_Type,"_",Smoking_Status))
+```
+
+#Look at PCA
+
+Prior to Differential Expression Analysis, basic exploratory data analysis was performed to look for any biases or batch effects in the microarray data. There were no batch effects determined such as ones caused by affymatrix type (only 1 platform used) or other potential factors.
+
+```{r}
+#Convert into matrix used by PRCOMP
+pca_matrix <- Matrix %>%
+  t()
+
+#Check order of the metadata and matrix
+identical(Columns_of_Interest$geo_accession, rownames(pca_matrix))
+
+#Run PCA 
+PCA <- prcomp(pca_matrix)
+
+#Look at graphs by the various groups to see if there is a bias that is unexpected. The fviz_pca_biplot makes the graphs easier to make that manually pulling out the values.
+
+#By Smoking Status
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Columns_of_Interest$Smoking_Status,
+                label = "none")
+
+#By Tissue Type
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Columns_of_Interest$Tissue_Type,
+                label = "none")
+
+#Smoking Status and Tissue Type Combined
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Columns_of_Interest$Smoking_and_Tissue_Type,
+                label = "none")
+
+ggsave(filename = file.path(Figure_Export, "PCA_GSE43458.png"))
+
+```
+
+
+#Use Limma() to run differential expression analysis
+
+After running basic exploratory analysis to look for potential batch effects that must be accounted for, differential gene expression analysis was performed using the Limma package. A simple design was created for this differential gene expression analysis with guidance from the Limma User guide.
+
+```{r}
+#Create Factor to contrast samples that are a Lung Tumor Compared to Normal Tissue. In this example, The Lung Tumor is associated with 1, and normal tissue associated with 2.
+Factors <- Columns_of_Interest %>%
+  mutate(level = if_else(Tissue_Type == "Lung tumor", 1, 2),
+         level = factor(level, levels = c(1,2)))
+
+#Set Basic Design for the Differential Analysis
+Design <- model.matrix(~ 0 + Factors$level)
+
+#Set the names for the design (while ensuring the name is valid) since this appears to be an issue
+valid_names <- make.names(unique(Factors$Tissue_Type))
+
+colnames(Design) <- valid_names
+
+#Run a Linear Fit 
+fit <- lmFit(object = Matrix, design = Design)
+
+#Make Contrasts (In this case, there is only 1 contrast)
+contrasts <- makeContrasts(Lung.tumor-Normal.lung.tissue, 
+                           levels = Design)
+
+#Re-run the linear fit based on the contrasts designed (In this case, a single contrast)
+fit2 <- contrasts.fit(fit, contrasts) 
+fit2 <- eBayes(fit2)
+
+#Look at Differential Expression of Lung Tumor vs Normal Lung Tissue. It appears that the logFC is indeed log2 and then save the object.
+Lung_Tumor_to_Normal_Tissue <- topTable(fit2, coef = NULL, number = length(rownames(Matrix)), adjust.method = "BH")
+
+Lung_Tumor_to_Normal_Tissue <- Lung_Tumor_to_Normal_Tissue %>%
+  mutate(Significance = case_when(
+    adj.P.Val < 0.05 & logFC > 1 ~ "Upregulated",
+    adj.P.Val < 0.05 & logFC < -1 ~ "Downregulated",
+    TRUE ~ "No Significance"
+  ))
+
+#Save Differential Expression Results
+saveRDS(Lung_Tumor_to_Normal_Tissue, file = file.path(Data_Import, "GSE43458_DEG_results.rds"))
+
+#Number of Upregulated and Downregulated Genes
+Sig_table <- table(Lung_Tumor_to_Normal_Tissue$Significance)
+
+#Reproduction of Figure 1b from Xiong et al 2020
+
+Lung_Tumor_to_Normal_Tissue %>%
+  ggplot(aes(x=logFC, y = -log10(adj.P.Val)))+
+  geom_point(aes(color = Significance))+
+  geom_vline(xintercept = 1, linetype = "dashed")+
+  geom_vline(xintercept = -1, linetype = "dashed")+
+  xlim(-5, 5)+
+  ylim(0, 40)+
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))+
+  labs(title = "GSE43458", x = "log2FoldChange", y = "-log10(adj.pvalue)")+
+  #labs(caption = paste0("# of Downregulated Genes: ", Up_or_down[1],", # of No Significance Genes: ", Up_or_down[2],", # of Upregulated Genes: ", Up_or_down[3]))+
+  scale_color_manual(values = c("Downregulated" = "#7CC5D6",
+                                "No Significance" = "#2C2E2D",
+                                "Upregulated" = "#E74033"))+
+annotate("text", x = -3.75, y = 35, size = 3.5, label = paste("Downregulated Genes: ", Sig_table[1]))+
+annotate("text", x = 3.75, y = 35, size = 3.5, label = paste("Upregulated Genes: ", Sig_table[3]))
+
+ggsave(filename = file.path(Figure_Export, "DEG_GSE43458_Fig1B.png"))
+
+```
+
+
+#More Complex Contrast Analysis
+
+The differential expression previously performed compares Lung Tumors compared to Normal Lung Tissue. This is a slightly more detailed comparison allowing the comparison of Lung Tumors of patients who have not smoked, Lung Tumors of patients who do smoke, and Normal Lung tissue. This will not be used to reproduce the work in Xiong et al 2020, but comparisons can be made for other downstream analysis if desired and was included in this R-markdown document
+
+```{r}
+#Select Factors for each of the variables of interest
+Factors <- Columns_of_Interest %>%
+  mutate(Level = case_when(
+    Smoking_and_Tissue_Type == "Lung tumor_Never-smoker" ~ 1,
+    Smoking_and_Tissue_Type == "Normal lung tissue_Never-smoker" ~ 2,
+    Smoking_and_Tissue_Type == "Lung tumor_Smoker" ~ 3)) %>%
+  mutate(Level = factor(Level, levels = c(1,2,3)))
+    
+#Set Design and associate each sample with one of the factors in a matrix
+Design <- model.matrix(~ 0 + Factors$Level)
+
+#Set the names for the design (while ensuring the name is valid) since this appears to be an issue
+valid_names <- make.names(unique(Factors$Smoking_and_Tissue_Type))
+
+colnames(Design) <- valid_names
+
+#Run a fit
+fit <- lmFit(object = Matrix, design = Design)
+
+#Make Contrasts to compare the different groups to each other. We know what each of the groups mean based on what we selected for the Factors previously.
+contrasts <- makeContrasts(Normal.lung.tissue_Never.smoker-Lung.tumor_Never.smoker, 
+                           Lung.tumor_Smoker-Normal.lung.tissue_Never.smoker, 
+                           Lung.tumor_Smoker-Lung.tumor_Never.smoker, 
+                           levels = Design)
+
+#Run fit with more statistical analysis
+fit2 <- contrasts.fit(fit, contrasts) 
+fit2 <- eBayes(fit2)
+
+#Look at the Differential Expression for each of the contrasts
+
+Normal_Lung_to_Lung_Tumor_no_smoke <- topTable(fit2, coef=1, adjust="BH", length(rownames(Matrix)))
+
+Lung_Tumor_Smoker_to_Normal_Lung <- topTable(fit2, coef=2, adjust="BH", length(rownames(Matrix)))
+
+Lung_Tumor_Smoker_to_Lung_Tumor_no_smoke <- topTable(fit2, coef=3, adjust="BH", length(rownames(Matrix)))
+
+#Look at all the results
+results <- decideTests(fit2)
+
+#Venn diagram of looking differentially expressed genes between the 3 contrasts
+vennDiagram(results)
+
+```
+

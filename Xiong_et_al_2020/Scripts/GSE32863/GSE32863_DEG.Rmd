@@ -1,0 +1,179 @@
+---
+title: "GSE32863_DEG"
+output: html_document
+---
+
+#Import Library 
+
+```{r}
+library(tidyverse)
+library(limma)
+library(factoextra)
+library(MASS)
+
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+```
+
+
+#Import the GSE32863 Matrix
+
+```{r}
+#Import Processed Counts
+Matrix <- readRDS(file = file.path(Data_Import,"GSE32863_Processed_Data.rds"))
+
+#Import Metadata
+Metadata <- readRDS(file = file.path(Data_Import,"GSE32863_Metadata.rds"))
+
+Cols_of_Interest <- Metadata %>% dplyr::select(source_name_ch1,
+                                               batch = characteristics_ch1.1,
+                                               beadchip = characteristics_ch1.5,
+                                               beadchip_2 = characteristics_ch1.6,
+                                               smoking = characteristics_ch1.13,
+                                               reoccurence = characteristics_ch1.15,
+                                               sex = characteristics_ch1.10,
+                                               race = characteristics_ch1.11)
+
+
+```
+
+#Run PCA Quality Checking prior to running Differential Expression Analysis
+
+Quality Checking should occur to make sure that there are no batch effects or other factors that may need to be accounted for prior to differential expression analysis. An example would be any batch effects that might confound the analysis.
+
+```{r}
+pca_matrix <- Matrix %>%
+  t()
+
+#Check the metadata alignment of the column and rownames of the Matrix and then look at biplot
+identical(rownames(pca_matrix), Metadata$geo_accession)
+
+PCA <- prcomp(pca_matrix)
+
+#Look at Biplot
+
+#Faceted by Batch
+
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$batch,
+                label = "none")
+
+#Faceted by Sex
+
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$sex,
+                label = "none")
+
+#Faceted by Race
+
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$race,
+                label = "none")
+
+#Faceted by Reoccurence
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$reoccurence,
+                label = "none")
+
+#By Beadchip
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$beadchip,
+                label = "none")
+
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$beadchip_2,
+                label = "none")
+
+#Faceted by Smoking
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$smoking,
+                label = "none")
+
+#By Tissue Type
+fviz_pca_biplot(X = PCA,
+                geom.var = c(""),
+                habillage = Cols_of_Interest$source_name_ch1,
+                label = "none")
+
+ggsave(filename = file.path(Figure_Export, "PCA_GSE32863.png"))
+```
+
+#Run Differential Gene Expression by Limma()
+
+Run differential gene expression on the micro array data using the limma() package with the use of the Limma user guide to help in the pipeline.
+```{r}
+#Create Factor to contrast samples that are a Lung Tumor Compared to Normal Tissue
+design_factor <- factor(Cols_of_Interest$source_name_ch1, levels = c("Adjacent non-tumor lung", "Lung adenocarcinoma"))
+
+#Set Basic Design for the Differential Analysis
+Design <- model.matrix(~ 0 + design_factor)
+
+#Set the names for the design (while ensuring the name is valid) since this appears to be an issue
+valid_names <- make.names(unique(Cols_of_Interest$source_name_ch1))
+
+colnames(Design) <- valid_names
+
+#Run a Linear Fit 
+fit <- lmFit(object = Matrix, design = Design)
+
+#Make Contrasts (In this case, there is only 1 contrast)
+contrasts <- makeContrasts(Lung.adenocarcinoma-Adjacent.non.tumor.lung, 
+                           levels = Design)
+
+#Re-run the linear fit based on the contrasts designed 
+fit2 <- contrasts.fit(fit, contrasts) 
+fit2 <- eBayes(fit2)
+
+
+#Look at Differential Expression of Lung Tumor vs Normal Lung Tissue. It appears that the logFC is indeed log2 and then save the object.
+Lung_Tumor_vs_Non_Tumor <- topTable(fit2, coef = NULL, number = length(rownames(Matrix)), adjust.method = "BH")
+
+
+#Add Significance
+Lung_Tumor_vs_Non_Tumor <- Lung_Tumor_vs_Non_Tumor %>%
+  mutate(Significance = case_when(
+    adj.P.Val < 0.05 & logFC > 1 ~ "Upregulated",
+    adj.P.Val < 0.05 & logFC < -1 ~ "Downregulated",
+    TRUE ~ "No Significance"
+  ))
+
+saveRDS(Lung_Tumor_vs_Non_Tumor, file = file.path(Data_Import, "GSE32863_DEG_results.rds"))
+
+#Table of Significant Genes
+significance_table <- table(Lung_Tumor_vs_Non_Tumor$Significance)
+
+
+#Graph of the differential expression analysis
+
+Lung_Tumor_vs_Non_Tumor %>%
+ggplot(aes(x=logFC, y = -log10(adj.P.Val)))+
+  geom_point(aes(color = Significance))+
+  geom_vline(xintercept = 1, linetype = "dashed")+
+  geom_vline(xintercept = -1, linetype = "dashed")+
+  xlim(-5, 5)+
+  ylim(0, 60)+
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))+
+  labs(title = "GSE32863", x = "log2FoldChange", y = "-log10(adj.pvalue)")+
+  #labs(caption = paste0("# of Downregulated Genes: ", Up_or_down[1],", # of No Significance Genes: ", Up_or_down[2],", # of Upregulated Genes: ", Up_or_down[3]))+
+  scale_color_manual(values = c("Downregulated" = "#7CC5D6",
+                                "No Significance" = "#2C2E2D",
+                                "Upregulated" = "#E74033"))+
+annotate("text", x = -3.75, y = 55, size = 3.5, label = paste("Downregulated Genes: ", significance_table [1]))+
+annotate("text", x = 3.75, y = 55, size = 3.5, label = paste("Upregulated Genes: ", significance_table [3]))
+
+
+ggsave(filename = file.path(Figure_Export, "DEG_GSE32863_Fig1A.png"))
+
+
+```
+

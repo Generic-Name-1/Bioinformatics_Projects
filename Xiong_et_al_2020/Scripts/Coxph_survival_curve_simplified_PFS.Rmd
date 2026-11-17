@@ -1,0 +1,310 @@
+---
+title: "Coxph_survival_curve_simplified_1year"
+output: html_document
+---
+
+
+
+```{r}
+library(performance)
+library(tidyverse)
+library(here)
+library(broom)
+library(survival)
+library(survminer)
+library(pheatmap)
+library(DESeq2)
+library(gtsummary)
+library(patchwork)
+
+#File Pathways
+
+Figure_Export <- file.path(here(),"Figures")
+
+Data_Import <- file.path(here(), "Data")
+
+#Import txt files of Upregulated and Downregulated Genes
+
+Upregulated_Genes <- read.delim(file = file.path(Data_Import,"Upregulated_Genes.txt"), header = FALSE)
+
+Downregulated_Genes <- read.delim(file = file.path(Data_Import,"Downregulated_Genes.txt"), header = FALSE)
+
+#Vector of all the Genes
+All_Genes <- c(Upregulated_Genes, Downregulated_Genes)
+
+All_Genes <- unlist(All_Genes)
+
+#Import list of genes for each metric of interest that alone have a statistically significant impact on that metric (Tumor Growth, Lymph Invasion, etc)
+
+TumorGrowthRiskGenes <- read.delim(file = file.path(Data_Import, "TumorGrowthRisk_Genes_Univariate_Model.txt"))
+
+LymphInvasionGenes <- read.delim(file = file.path(Data_Import, "LymphGenes_Univariate_Model.txt"))
+
+MetastasisGenes <- read.delim(file = file.path(Data_Import, "MetastasisGenes_Univariate_Model.txt"))
+
+
+#Import ColData
+LUAD_ColData <- readRDS(file = file.path(Data_Import,"LUAD_Coldata.rds"))
+
+#Import the Raw Counts and use DESeq2 to run variance stabilization on the counts
+
+LUAD_VST_Expression_Values <- readRDS(file = file.path(Data_Import, "VST_transformed_values.rds"))
+
+#Checking to ensure they are true
+identical(LUAD_ColData$barcode, colnames(LUAD_VST_Expression_Values))
+
+#Import Clinical Data
+
+LUAD_CLINICAL_DATA <- readRDS(file = file.path(Data_Import,"LUAD_Clinicaldata.rds"))
+
+LUAD_CLINICAL_DATA <- LUAD_CLINICAL_DATA %>%
+  dplyr::select(submitter_id, days_to_last_follow_up, days_to_death, vital_status, days_to_recurrence, follow_ups_disease_response, classification_of_tumor, prior_malignancy)
+```
+
+#Identify Progression Free Survival (where the tumor has )
+
+Since it looks like none of the columns from the Clinical or ColData indicates, the Broad Institute or other portals were accessed to try to get more clinical data. This is because without some sort of metric to measure PFS, this area of the analysis can not be performed. However, by going to the Broad Institute Website, I was able to download manually the full clinical data that is not available from the TCGA portal.
+```{r}
+#Import Expanded Clinical Data
+luad_clinical_full <- read.delim(file.path(Data_Import, "gdac.broadinstitute.org_LUAD.Merge_Clinical.Level_1.2016012800.0.0/LUAD.clin.merged.txt"))
+
+luad_clinical_full <- luad_clinical_full %>% t()
+
+#Set_Names
+colnames(luad_clinical_full) <- luad_clinical_full[1,] %>% as.vector() %>% str_remove(., "patient.")
+
+#Remove the 1st row which is just the column names
+luad_clinical_full <- as.data.frame(luad_clinical_full) %>% dplyr::slice(2:523)
+
+luad_clinical_full <- luad_clinical_full %>% dplyr::select(bcr_patient_barcode, days_to_initial_pathologic_diagnosis, days_to_last_followup, days_to_last_known_alive, diagnosis, follow_ups)
+```
+
+
+#Downloaded Expanded Clinical Survival Data
+
+I went to the following url and downloaded from the [cBioPortal](https://www.cbioportal.org/study/summary?id=luad_tcga_gdc). Next to the top right where it says 569 patients and 571 samples and clicked "Download Clinical Data for Selected Case" which is the down arrow 3 buttons to the right of where it says "569 patients | 571 samples". To be clear, on the cBioPortal website, there is both the TCGA-LUAD from the Pan Cancer Atlas and from the GDC portal. However, the TCGAbiolinks package pulls from the GDC (Genomic Data Commons) portal website, so that is the dataset I will be pulling form.
+
+```{r}
+#Import TSV File
+Expanded_LUAD_Clinical_Data <- read.delim(file = file.path(Data_Import, "luad_tcga_gdc_clinical_data.tsv"),
+                                          header = TRUE, sep = "\t",
+                                          check.names = TRUE) 
+
+Expanded_LUAD_Clinical_Data <- as_tibble(Expanded_LUAD_Clinical_Data)
+
+#Select Columns of Interest
+Expanded_LUAD_Clinical_Data <- Expanded_LUAD_Clinical_Data %>% dplyr::select(Patient = Patient.ID,
+                                                                             Sample = Sample.ID, 
+                                                                             DFS_months = Disease.Free..Months., 
+                                                                             DFS_Status = Disease.Free.Status, 
+                                                                             Overall_Survival = Overall.Survival..Months., 
+                                                                             Overall_Survival_Status = Overall.Survival.Status)
+
+#Combine the Expanded Clinical Data with the original LUAD Data
+Expanded_LUAD_Clinical_Data <- Expanded_LUAD_Clinical_Data %>%
+  left_join(., LUAD_CLINICAL_DATA, by = c("Patient" = "submitter_id"))
+
+#Convert the DFS (Disease Free Status) as 0 and 1 where 0 is disease free and 1 is reoccurence/progression
+Expanded_LUAD_Clinical_Data <- Expanded_LUAD_Clinical_Data %>%
+  mutate(DFS_Status = case_when(
+    DFS_Status == "0:DiseaseFree" ~ 0, 
+    DFS_Status == "1:Recurred/Progressed" ~ 1,
+    TRUE ~ NA))
+```
+
+#Step 2: Join the VST stabilized values Data and the Expanded Clinical Data
+
+The VST stabilized data needs to be joined with the clinical data for downstream analysises in the Cox Proportional Hazard Model as well as other analysises can be performed.
+
+```{r}
+#Transposes data and forms new dataframe where the genes are in the columns and sample barcode IDs is in the rows
+LUAD_VST_Expression_Values <- LUAD_VST_Expression_Values %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(., var = "barcode") 
+
+LUAD_VST_Expression_Values <- LUAD_VST_Expression_Values %>%
+  mutate(patient_id = str_extract(barcode, ".{12}")) #Extracts the first 12 characters
+
+#pivot longer
+LUAD_VST_Expression_Values <- LUAD_VST_Expression_Values %>%
+  pivot_longer(cols = -c(barcode, patient_id), names_to = "Gene", values_to = "VST_Values")
+
+#Add clinical data and add whether the gene is high or low expression
+VST_Values_grouped <- LUAD_VST_Expression_Values %>%
+  group_by(Gene) %>%
+  mutate(Expression_Level = if_else(VST_Values > median(VST_Values), "High","Low")) %>%
+  left_join(., Expanded_LUAD_Clinical_Data, by = c("patient_id" = "Patient"))
+
+#DFS_Status --> 0 means the disease has not reoccured and 1 means the disease has reoccured
+#DFS_months --> The timeline for latest followup where the disease has reoccured after being disease free
+
+```
+
+#Step 3: Create the Survival Matrix for Progression Free Survival and import functions
+
+In this code chunk, the covariate genes will be attached to a single vector and a survival matrix with the needed information for PFS/DFS will be obtained. Additionally, as what was performed with overall patient survival, 3 different functions will be used that measure slightly differently to account for the effect of each gene on PFS/DFS (Progression Free Survival / Disease Free Survival). 
+```{r}
+
+#3.1 Identify all the Upregulated and Downregulated Genes
+covariate_genes <- c(Upregulated_Genes$V1, Downregulated_Genes$V1)
+
+#3.2 Filter for genes that are known to be upregulated and downregulated
+Survival_matrix_PFS <- VST_Values_grouped %>%
+  ungroup() %>%
+  filter(Gene %in% covariate_genes) %>% dplyr::select(-Expression_Level) %>%
+  pivot_wider(data=., names_from = "Gene", values_from = "VST_Values")
+
+
+##3.3  Function to run a univariate scan
+
+#Quickly screen the univariate results
+univariate_quickscan <- function(covariates_of_interest = NA,
+                                 cox_formula = "Surv(time_in_months, deceased)",
+                                 data_input = data){
+
+#Run lapply for each covariate to quickly run the cox model for each covariate. The alternative is to do a regular for loop with indexing, but this is in theory a faster mechanism
+results <- lapply(covariates_of_interest, function(covariate){
+  
+  #Prepare Cox Formula 
+  
+  used_formula <- reformulate(termlabels = covariate, response = cox_formula)
+  
+  #Run Formula
+  model_cox <- coxph(formula = used_formula, data = data_input)
+  
+  model_summary <- summary(model_cox)
+  
+  #Attach Data as a combined list for each iteration of the covariate
+  c(
+  Covariate <- as.character(covariate),
+  HR    <- signif(model_summary$coefficients[2], 2),
+  lower <- signif(model_summary$conf.int[, "lower .95"], 2),
+  upper <- signif(model_summary$conf.int[, "upper .95"], 2),
+  HR   <- signif(model_summary$wald["pvalue"], 2)
+  )
+})
+
+
+combined_data <- as.data.frame(do.call(rbind, results)) #This function takes all the items that were saved to results as a list (from sapply) and convertes them to a dataframe
+
+colnames(combined_data) <- c("Covariate","HR","Lower","Upper","pvalue")
+
+return(combined_data)
+
+}
+
+#Step 3.4 Run a repeated univariate analysis using a log-rank test to see if there is a different between high and low expression groups for each gene on patient survival.
+
+#Kaplan Meier Curve quickscan 
+Repeated_Kaplan_Meier_Curve <- function(fulldata = data,
+                                        predictor_variable = "Expression_Level",
+                                        time = "time_in_months",
+                                        outcome = "deceased",
+                                        group_metric = "symbol",
+                                        units_of_time = "months"){
+  
+  #Extract the variables
+  predictor_metric <- fulldata[[predictor_variable]]
+  time_metric <- fulldata[[time]]
+  outcome_metric <- fulldata[[outcome]]
+  group_metric <- fulldata[[group_metric]]
+  
+  
+  Combined_Dataset <- data.frame(predictor_metric = predictor_metric,
+                                 time_metric = time_metric,
+                                 outcome_metric = outcome_metric,
+                                 group_metric = group_metric)
+  
+  ##Choose the names of the columns for the analysis
+  names <-  Combined_Dataset %>% 
+    survfit(Surv(time_metric, outcome_metric) ~ predictor_metric, data = .) %>%
+    surv_median(fit = .)
+  
+  #Run a loop to calculate the median survival for each group + p value
+  
+  Symbols <- unique(Combined_Dataset$group_metric) 
+  
+  #Create an Empty Dataframe and preallocate the length
+  Pvaluegraph <- data.frame(matrix(ncol = 4, nrow = length(Symbols)))
+  # Pvaluegraph <- matrix(ncol = 4, nrow = length(Symbols))
+  
+  #Run a loop to calculate the median survival for each group + p value
+  
+  
+  for(i in 1:length(Symbols)){
+    
+    Gene <- Symbols[i]
+    
+    filtered_data <- Combined_Dataset %>% filter(group_metric == Gene)
+    
+    fit <- survfit(Surv(time_metric, outcome_metric) ~ predictor_metric, data = filtered_data)
+    
+    median <- surv_median(fit, combine = TRUE)
+    
+    pval <- survdiff(Surv(time_metric, outcome_metric) ~ predictor_metric, data = filtered_data)$pval
+    
+    new_data <- c(Gene, as.numeric(round(median[1,2],2)), as.numeric(round(median[1,3],2)), pval)
+    
+    Pvaluegraph[i,] <- new_data
+    
+  }
+  #Return the combined dataframe after renaming the column
+  
+  colnames(Pvaluegraph) <- c("symbol", as.character(paste("Median survival in",units_of_time, "of", names[1,1])), 
+                             as.character(paste("Median survival in",units_of_time, "of",names[2,1])), "p_value")
+  
+  return(Pvaluegraph)   
+}
+
+```
+
+
+Now, through the use of the 3 different methods for identifying whether each gene has a statistically significant impact on disease free progression will be used. This will determine how many genes have a statistically significant impact on disease free progression / progression free survival after correcting for multiple comparisons.
+
+```{r}
+###3.4 Run Cox quickscan on the covariates for the dataset that are statistically significant in a cox proportional hazard model for PFS
+
+coxph_quickscan_PFS <- univariate_quickscan(covariates_of_interest = covariate_genes,
+                                        cox_formula = "Surv(DFS_months, DFS_Status)",
+                                           data_input = Survival_matrix_PFS)
+
+#After adjusting for multiple comparisons, there appear to be 0 genes that have a statistically significant impact on patient PFS.
+coxph_quickscan_PFS <- coxph_quickscan_PFS %>%
+  ungroup() %>%
+  mutate(p_adjust = p.adjust(pvalue, method = "BH")) %>%
+  filter(p_adjust < 0.05)
+
+
+
+
+#3.5 Test if we get the same results by converting all of the points into a high or low expression for each gene by comparing each value to the median value for that gene. With respect to progression free survival, we get similar results where after a multiple comparison, there is no gene where there is a statistically significant impact on patient survival between the high and low expression groups.
+
+cox_quickscan_highlow_PFS <- Survival_matrix_PFS %>%
+  mutate(across(all_of(covariate_genes), ~ if_else(.x > mean(.x), "High", "Low"))) %>%
+  univariate_quickscan(covariates_of_interest = covariate_genes,
+                       cox_formula = "Surv(DFS_months, DFS_Status)",
+                                           data_input = .) %>%
+  mutate(p_adjust = p.adjust(pvalue, method = "BH")) %>%
+  filter(p_adjust < 0.05)
+
+
+#3.6 Test running using the Kaplan Meier / Log Rank Test test between the high and low survival groups rather than using the coxph model. In this example as well, with respect to PFS, there are no genes that have a statistically significant impact on patient survival between the high and low groups after a multiple comparison correction.
+
+kaplan_meier_quickscan_PFS <- Survival_matrix_PFS %>%
+  mutate(across(all_of(covariate_genes), ~ if_else(.x > mean(.x), "High", "Low"))) %>%
+  pivot_longer(data=., cols = c(covariate_genes), names_to = "Genes", values_to = "Expression_Level") %>%
+  Repeated_Kaplan_Meier_Curve(fulldata =.,
+                              predictor_variable = "Expression_Level",
+                              time = "DFS_months",
+                              group_metric = "Genes",
+                              outcome = "DFS_Status",
+                              units_of_time = "months") %>%
+  mutate(p_adjust = p.adjust(p_value, method = "BH")) %>%
+  filter(p_adjust < 0.05)
+
+
+```
+
+Results: After testing for multiple comparisons, there are no genes that have a statistically significant impact on disease free progression / progression free survival, so there is no further testing that needs to be performed.
+
+
